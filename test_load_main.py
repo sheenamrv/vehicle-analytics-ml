@@ -9,6 +9,7 @@ from pathlib import Path
 def run_project(project, og_df, working_df):
 
     label_col = project.get("label_column")
+    project_modified = False
 
     while True:
 
@@ -45,6 +46,9 @@ def run_project(project, og_df, working_df):
                 og_df
             )
 
+            project["selected_columns"] = list(working_df.columns)
+            project_modified = True
+
         elif choice == "3":
 
             working_df = remove_col(
@@ -52,17 +56,26 @@ def run_project(project, og_df, working_df):
                 og_df
             )
 
+            project["selected_columns"] = list(working_df.columns)
+            project_modified = True
+
         elif choice == "4":
 
             working_df = change_dtype(
                 working_df
             )
 
+            project["column_types"] = {col: str(working_df[col].dtype) for col in working_df.columns}
+            project_modified = True
+
         elif choice == "5":
 
             label_col = set_label(
                 working_df
             )
+
+            project["selected_columns"] = label_col
+            project_modified = True
 
         elif choice == "6":
 
@@ -101,6 +114,7 @@ def run_project(project, og_df, working_df):
                 working_df
             )
 
+            project_modified = False
             print("\nProject saved.")
 
         elif choice == "8":
@@ -116,6 +130,8 @@ def run_project(project, og_df, working_df):
                 "column": column,
                 "method": method
             })
+          
+            project_modified = True
 
         elif choice == "9":
 
@@ -132,6 +148,8 @@ def run_project(project, og_df, working_df):
                 "std": std
             })
 
+            project_modified = True
+
         elif choice == "10":
 
             working_df, column = (
@@ -145,6 +163,8 @@ def run_project(project, og_df, working_df):
                 "column": column
             })
 
+            project_modified = True
+
         elif choice == "11":
 
             create_visualization(
@@ -152,6 +172,34 @@ def run_project(project, og_df, working_df):
             )
 
         elif choice == "0":
+
+            if project_modified:
+                save_choice = input("Save changes y/n: ").lower()
+
+                if save_choice == "y":
+
+                    project["selected_columns"] = (
+                        list(working_df.columns)
+                    )
+
+                    project["label_column"] = (
+                        label_col
+                    )
+
+                    project["column_types"] = {
+                        col: str(
+                            working_df[col].dtype
+                        )
+                        for col in working_df.columns
+                    }
+
+                    save_project(
+                        project,
+                        og_df,
+                        working_df
+                    )
+
+                    print("\nProject saved.")
 
             break
 
