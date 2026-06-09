@@ -19,3 +19,9 @@ To run locally:
 - Use the venv/Scripts/python.exe
 
 5. Run python scripts using python <name>.py
+
+6. Test streamlit using app.py
+
+7. Test software using run.py
+
+8. Once all is good and there are no issues we can run ```pyinstaller --onedir --windowed run.py```
