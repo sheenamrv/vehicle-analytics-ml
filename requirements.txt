@@ -3,3 +3,7 @@ openpyxl
 joblib
 scikit-learn
 matplotlib
+streamlit
+pyinstaller
+pywebview
+requests
