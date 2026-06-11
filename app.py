@@ -1,10 +1,8 @@
 import streamlit as st
-from src.test import *
+import pages.load_page.load_data as load_data
+from src.data.test_load import *
 
 st.title("Testing Windows Executable")
 st.write("By: Andrianna")
 
-name = st.text_input("Enter your name: ", placeholder="John Doe")
-
-if st.button("Greet me!"):
-    st.write(greet(name))
+load_data.load_page()
