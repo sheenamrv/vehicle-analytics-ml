@@ -7,3 +7,5 @@ streamlit
 pyinstaller
 pywebview
 requests
+mrmr-selection
+pytest
