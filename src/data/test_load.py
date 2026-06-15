@@ -109,7 +109,13 @@ def change_dtype(working_df):
     dtype = input("New dtype: ").strip()
 
     try:
-        working_df[col] = (working_df[col].astype(dtype))
+        
+        if dtype in ["int", "int64"]:
+            working_df[col] = (pd.to_numeric(working_df[col], errors="raise").astype(int))
+        elif dtype in ["float", "float64"]:
+            working_df[col] = pd.to_numeric(working_df[col], errors="raise")
+        else:
+            working_df[col] = (working_df[col].astype(dtype))
 
         print(f"{col} is now {dtype}")
 
