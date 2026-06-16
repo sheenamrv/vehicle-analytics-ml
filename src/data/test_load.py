@@ -111,15 +111,20 @@ def change_dtype(working_df):
     try:
         
         if dtype in ["int", "int64"]:
-            working_df[col] = (pd.to_numeric(working_df[col], errors="raise").astype(int))
+            working_df[col] = (pd.to_numeric(working_df[col], errors="raise").astype("Int64"))
         elif dtype in ["float", "float64"]:
             working_df[col] = pd.to_numeric(working_df[col], errors="raise")
+        elif dtype in ["string", "object"]:
+            working_df[col] = working_df[col].astype("string")
+        elif dtype in ["bool", "boolean"]:
+            working_df[col] = working_df[col].astype("boolean")
         else:
             working_df[col] = (working_df[col].astype(dtype))
 
         print(f"{col} is now {dtype}")
 
     except Exception as e:
+        print("Conversion failed:\n")
         print(e)
     
     return working_df
