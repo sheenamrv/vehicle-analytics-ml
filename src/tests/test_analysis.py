@@ -18,7 +18,7 @@ def generate_df():
 def test_get_num_feature_columns():
     df = generate_df()
 
-    featuress = get_num_feature_columns(df, "label")
+    features = get_num_feature_columns(df, "label")
 
     # Make sure the label is filtered out
     assert "label" not in features
