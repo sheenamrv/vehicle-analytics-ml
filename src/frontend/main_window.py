@@ -637,7 +637,7 @@ class AnalyticsWindow(QMainWindow):
 
         self.analysis_title.setText("CORRELATION MATRIX")
         self.analysis_model.set_data(result.round(4))
-        self.analysis_chart.plot_correlation_heatmap(df)
+        self.analysis_chart.plot_correlation_heatmap(df.drop(columns=[label], errors="ignore"))
         self.on_workflow_tab_changed(2)
 
     def show_pca(self):
