@@ -19,7 +19,7 @@ To run locally:
 
 5. Run python scripts using python <name>.py
 
-6. Test PySide6 desktop application using app.py ```python app.py```
+6. Test PySide6 desktop application using app.py `python app.py`
 
 7. Test software using run.py
 
