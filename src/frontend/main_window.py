@@ -417,6 +417,10 @@ class AnalyticsWindow(QMainWindow):
             self.show_error("Dataset Error", error)
             return
 
+        if not datasets:
+            QMessageBox.warning(self, "Dataset Error", "No datasets found in the selected file.")
+            return
+
         self.dataset_combo.blockSignals(True)
         self.dataset_combo.clear()
         self.dataset_combo.addItems(datasets)
