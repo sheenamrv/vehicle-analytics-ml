@@ -181,7 +181,7 @@ def table_view(model):
     table = QTableView()
     table.setModel(model)
     table.setAlternatingRowColors(True)
-    table.setSortingEnabled(True)
+    table.setSortingEnabled(False)
     table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
     table.horizontalHeader().setStretchLastSection(True)
     table.verticalHeader().setDefaultSectionSize(24)
