@@ -1,3 +1,33 @@
+# Python environments
 venv/
+.venv/
+env/
+
+# Python bytecode and caches
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging and build output
+build/
+dist/
+*.egg-info/
+
+# PyInstaller generated files
+*.manifest
+*.toc
+
+# Generated model/feature exports
+ExportedModels/feature_dataset*.csv
+ExportedModels/*.tmp
+
+# Local/editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime logs
+*.log
