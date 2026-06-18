@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QVBoxLayout,
     QWidget,
+    QAbstractItemView
 )
 
 from src.analysis.analysis import (
@@ -23,7 +24,7 @@ from src.analysis.analysis import (
     pca_analysis,
 )
 from src.data.process import load_project, save_project
-from src.data.test_load import get_available_columns, get_datasets, select_col
+from src.data.test_load import get_available_columns, get_datasets, select_col, change_dtype
 from src.feature.feature import feature_extract
 from src.frontend.charts import ChartCanvas
 from src.frontend.data_summary import file_summary, missing_summary
@@ -41,6 +42,7 @@ from src.frontend.widgets import (
     tab_row,
     table_view,
     taller_dropdown,
+    DTypeDelegate
 )
 
 
@@ -88,6 +90,9 @@ class AnalyticsWindow(QMainWindow):
         self.dataset = None
         self.columns = []
         self.project = None
+        # Track original dtypes for the DTypeDelegate; start empty until a
+        # dataset is loaded.
+        self.original_dtypes = {}
         # Raw and working data mirror the existing project file format.
         self.og_df = pd.DataFrame()
         self.working_df = pd.DataFrame()
@@ -194,12 +199,18 @@ class AnalyticsWindow(QMainWindow):
         layout.addWidget(self.dataset_combo)
 
         self.label_combo = taller_dropdown(QComboBox())
+
+        self.label_combo.currentTextChanged.connect(self.update_selected_columns)
+
         layout.addWidget(QLabel("Label"))
         layout.addWidget(self.label_combo)
 
         layout.addWidget(QLabel("Features"))
         self.column_picker = ColumnPicker("Search columns")
         self.column_picker.setMinimumHeight(190)
+
+        self.column_picker.selectionChange.connect(self.update_selected_columns)
+
         layout.addWidget(self.column_picker)
 
         self.project_name = QLineEdit()
@@ -309,7 +320,32 @@ class AnalyticsWindow(QMainWindow):
 
         preview = data_panel("DATASET PREVIEW", self.preview_model)
         summary = data_panel("FILE SUMMARY", self.file_summary_model)
-        missing = data_panel("MISSING VALUES SUMMARY", self.missing_model)
+        # missing = data_panel("MISSING VALUES SUMMARY", self.missing_model)
+
+        missing_widget = QWidget()
+        missing_layout = QVBoxLayout(missing_widget)
+
+        title = QLabel("MISSING VALUES SUMMARY")
+        title.setProperty("panelTitle", True)
+
+        self.missing_table = table_view(self.missing_model)
+
+        self.dtype_delegate = DTypeDelegate(self.missing_table, self.original_dtypes)
+        self.missing_table.setItemDelegateForColumn(
+            1,
+            self.dtype_delegate
+        )
+
+        # When the dtype column is edited in the missing table, apply the
+        # conversion to the working DataFrame.
+        self.missing_model.dtypeChanged.connect(self.change_column_type)
+
+        missing_layout.addWidget(title)
+        missing_layout.addWidget(self.missing_table)
+
+        self.missing_table.setEditTriggers(QAbstractItemView.AllEditTriggers)
+
+
         # Missing-value chart lives in Import because it describes data quality.
         self.missing_chart = ChartCanvas(
             "Open a dataset to profile missing values.",
@@ -318,7 +354,7 @@ class AnalyticsWindow(QMainWindow):
 
         layout.addWidget(preview, 0, 0, 1, 3)
         layout.addWidget(summary, 0, 3, 1, 1)
-        layout.addWidget(missing, 1, 0, 1, 4)
+        layout.addWidget(missing_widget, 1, 0, 1, 4)
         layout.addWidget(self.missing_chart, 2, 0, 1, 4)
         layout.setColumnStretch(0, 3)
         layout.setColumnStretch(1, 3)
@@ -329,6 +365,36 @@ class AnalyticsWindow(QMainWindow):
         layout.setRowStretch(1, 2)
         layout.setRowStretch(2, 1)
         self.main_stack.addWidget(page)
+
+    def change_column_type(self, column_name, new_dtype):
+
+        print(f"Changing {column_name} to {new_dtype}...")
+        old_dtype = str(self.working_df[column_name].dtype)
+
+        try:
+
+            self.working_df = change_dtype(
+                self.working_df,
+                column_name,
+                new_dtype
+            )
+
+            print(self.working_df.dtypes)
+            # Update recorded original dtypes so delegates and UI stay in sync.
+            self.original_dtypes[column_name] = new_dtype
+            if hasattr(self, "dtype_delegate"):
+                self.dtype_delegate.original_dtypes = self.original_dtypes
+            self.refresh_import_tables()
+
+        except Exception as e:
+
+            QMessageBox.warning(
+                self,
+                "Conversion Failed",
+                f"Could not convert '{column_name}' to {new_dtype}\n\n{e}"
+            )
+
+            self.refresh_import_tables()
 
     def _build_feature_page(self):
         page = QWidget()
@@ -454,6 +520,11 @@ class AnalyticsWindow(QMainWindow):
         self.columns = list(self.og_df.columns)
         self.project_name.setText(self.project.get("project_name", ""))
 
+        # Populate original_dtypes in-place so delegates stay in sync.
+        self.original_dtypes.clear()
+        for col in self.og_df.columns:
+            self.original_dtypes[col] = str(self.og_df[col].dtype)
+
         self.dataset_combo.blockSignals(True)
         self.dataset_combo.clear()
         self.dataset_combo.addItem(self.dataset)
@@ -474,6 +545,13 @@ class AnalyticsWindow(QMainWindow):
             self.columns = get_available_columns(self.file_path, self.dataset)
             self.og_df = select_col(self.file_path, self.dataset, self.columns)
             self.working_df = self.og_df.copy()
+
+            # Preserve the same dict object so delegates referencing
+            # `self.original_dtypes` stay up to date.
+            self.original_dtypes.clear()
+            for col in self.og_df.columns:
+                self.original_dtypes[col] = str(self.og_df[col].dtype)
+
         except Exception as error:
             self.show_error("Load Error", error)
             return
@@ -487,7 +565,9 @@ class AnalyticsWindow(QMainWindow):
     def populate_column_controls(self):
         """Refresh every control whose choices come from dataset columns."""
         self.column_picker.set_items(self.columns, checked=True)
+        self.column_picker.blockSignals(True)
         self.signal_picker.set_items(self.columns, checked=True)
+        self.column_picker.blockSignals(False)
 
         self.label_combo.clear()
         self.label_combo.addItems([str(col) for col in self.columns])
@@ -513,6 +593,21 @@ class AnalyticsWindow(QMainWindow):
         if label and label not in columns:
             columns.append(label)
         return columns
+
+    def update_selected_columns(self):
+        """Return the selected columns, and retain the chosen label"""
+        if self.og_df.empty:
+            return
+        
+        columns = self.selected_columns()
+
+        if not columns:
+            self.working_df = pd.DataFrame()
+        else:
+            self.working_df = self.og_df[columns].copy()
+
+        self.refresh_import_tables()
+        self.populate_visualization_controls()
 
     def create_project(self):
         """Persist the selected dataset configuration as an ICP project."""

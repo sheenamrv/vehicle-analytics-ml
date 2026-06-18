@@ -98,15 +98,38 @@ def remove_col(working_df, og_df):
 
     return working_df.drop(columns=cols_to_remove, errors="ignore")
 
-def change_dtype(working_df):
+# def change_dtype(working_df):
 
-    print("Current Cols: ")
+#     print("Current Cols: ")
 
-    for col in working_df.columns:
-        print(f"{col} : {working_df[col].dtype}")
+#     for col in working_df.columns:
+#         print(f"{col} : {working_df[col].dtype}")
 
-    col = input("Columns: ").strip()
-    dtype = input("New dtype: ").strip()
+#     col = input("Columns: ").strip()
+#     dtype = input("New dtype: ").strip()
+
+#     try:
+        
+#         if dtype in ["int", "int64"]:
+#             working_df[col] = (pd.to_numeric(working_df[col], errors="raise").astype("Int64"))
+#         elif dtype in ["float", "float64"]:
+#             working_df[col] = pd.to_numeric(working_df[col], errors="raise")
+#         elif dtype in ["string", "object"]:
+#             working_df[col] = working_df[col].astype("string")
+#         elif dtype in ["bool", "boolean"]:
+#             working_df[col] = working_df[col].astype("boolean")
+#         else:
+#             working_df[col] = (working_df[col].astype(dtype))
+
+#         print(f"{col} is now {dtype}")
+
+#     except Exception as e:
+#         print("Conversion failed:\n")
+#         print(e)
+    
+#     return working_df
+
+def change_dtype(working_df, col, dtype):
 
     try:
         
@@ -121,13 +144,11 @@ def change_dtype(working_df):
         else:
             working_df[col] = (working_df[col].astype(dtype))
 
-        print(f"{col} is now {dtype}")
+        return working_df
 
     except Exception as e:
-        print("Conversion failed:\n")
-        print(e)
-    
-    return working_df
+        # Raise the error so callers can handle it (e.g., show a dialog)
+        raise
 
 def set_label(working_df):
 

@@ -12,8 +12,10 @@ from PySide6.QtWidgets import (
     QTableView,
     QVBoxLayout,
     QWidget,
+    QComboBox,
+    QStyledItemDelegate
 )
-
+from PySide6.QtCore import Qt, Signal
 
 SIDEBAR_WIDTH = 280
 DROPDOWN_MIN_HEIGHT = 32
@@ -21,6 +23,8 @@ DROPDOWN_MIN_HEIGHT = 32
 
 class ColumnPicker(QWidget):
     """Searchable checkbox list for column/feature selection."""
+
+    selectionChange = Signal()
 
     def __init__(self, empty_text):
         super().__init__()
@@ -60,6 +64,9 @@ class ColumnPicker(QWidget):
             checkbox = QCheckBox(str(item))
             checkbox.setChecked(checked)
             checkbox.setToolTip(str(item))
+
+            checkbox.stateChanged.connect(self._selection_changed)
+
             self.checkboxes[str(item)] = checkbox
             self.list_layout.insertWidget(self.list_layout.count() - 1, checkbox)
 
@@ -79,6 +86,9 @@ class ColumnPicker(QWidget):
         needle = text.strip().lower()
         for name, checkbox in self.checkboxes.items():
             checkbox.setVisible(needle in name.lower())
+
+    def _selection_changed(self):
+        self.selectionChange.emit()
 
 
 def tab_row(parent, labels, callback, compact=False):
@@ -188,3 +198,87 @@ def table_view(model):
     table.setSelectionBehavior(QTableView.SelectRows)
     table.setWordWrap(False)
     return table
+
+# Dtype conversion
+
+def allowed_dtypes(current_dtype):
+
+    current_dtype = str(current_dtype)
+
+    mapping = {
+        "int64": ["int64", "float64", "string"],
+        "Int64": ["int64", "float64", "string"],
+        "float64": ["float64", "int64", "string"],
+        "string": ["string"],
+        "object": ["string"],
+        "boolean": ["boolean", "string"],
+        "bool": ["boolean", "string"]
+    }
+
+    return mapping.get(
+        current_dtype,
+        [current_dtype]
+    )
+
+class DTypeDelegate(QStyledItemDelegate):
+    
+    DEFAULT_TYPES = [
+        "int64",
+        "float64",
+        "string",
+        "boolean"
+    ]
+
+    def __init__(self, parent=None, original_dtypes=None):
+        super().__init__(parent)
+        self.original_dtypes = original_dtypes or {}
+        
+    def createEditor(
+        self,
+        parent,
+        option,
+        index
+    ):
+
+        combo = QComboBox(parent)
+
+        column_name = index.model()._data.iloc[index.row()]["column"]
+
+        current_dtype = index.model()._data.iloc[index.row()]["dtype"]
+        
+        original_dtype = self.original_dtypes.get(column_name)
+
+        choices = allowed_dtypes(current_dtype)
+
+        if original_dtype and original_dtype not in choices:
+            choices.insert(0, original_dtype)
+
+        combo.addItems(choices)
+
+        return combo
+
+    def setEditorData(
+        self,
+        editor,
+        index
+    ):
+
+        value = index.data()
+
+        pos = editor.findText(value)
+
+        if pos >= 0:
+            editor.setCurrentIndex(pos)
+
+    def setModelData(
+        self,
+        editor,
+        model,
+        index
+    ):
+
+        model.setData(
+            index,
+            editor.currentText(),
+            Qt.EditRole
+        )

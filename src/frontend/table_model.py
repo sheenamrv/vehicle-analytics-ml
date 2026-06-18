@@ -1,10 +1,11 @@
 import pandas as pd
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 
 
 class PandasTableModel(QAbstractTableModel):
     """Expose a pandas DataFrame through Qt's table model interface."""
 
+    dtypeChanged = Signal(str, str)
     def __init__(self, data=None):
         super().__init__()
         self._data = pd.DataFrame() if data is None else data
@@ -38,3 +39,35 @@ class PandasTableModel(QAbstractTableModel):
         if orientation == Qt.Horizontal:
             return str(self._data.columns[section])
         return str(self._data.index[section])
+
+    def flags(self, index):
+        flags = super().flags(index)
+
+        if (len(self._data.columns) > 1 and self._data.columns[index.column()] == "dtype"):
+            return flags | Qt.ItemIsEditable
+        return flags
+
+    def setData(self, index, value, role=Qt.EditRole):
+
+        if role != Qt.EditRole:
+            return False
+
+        column_name = self._data.columns[index.column()]
+
+        if column_name != "dtype":
+            return False
+
+        row = index.row()
+
+        actual_column = self._data.iloc[row]["column"]
+
+        self._data.iat[row, index.column()] = value
+
+        self.dtypeChanged.emit(
+            actual_column,
+            value
+        )
+
+        self.dataChanged.emit(index, index)
+
+        return True
