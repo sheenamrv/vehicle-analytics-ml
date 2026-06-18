@@ -29,6 +29,7 @@ from src.frontend.charts import ChartCanvas
 from src.frontend.data_summary import file_summary, missing_summary
 from src.frontend.styles import apply_app_styles
 from src.frontend.table_model import PandasTableModel
+from src.frontend.playback_page import PlaybackAnnotationPage, PlaybackSidebar # annotation page added
 from src.frontend.widgets import (
     ColumnPicker,
     data_panel,
@@ -162,11 +163,18 @@ class AnalyticsWindow(QMainWindow):
         self._build_feature_page()
         self._build_analysis_page()
         self._build_visualization_page()
+        
+        # The Tab 4 page
+        self.playback_page = PlaybackAnnotationPage()
+        self.main_stack.addWidget(self.playback_page)
 
         self.sidebar_stack.addWidget(self._import_sidebar())
         self.sidebar_stack.addWidget(self._feature_sidebar())
         self.sidebar_stack.addWidget(self._analysis_sidebar())
         self.sidebar_stack.addWidget(self._visualization_sidebar())
+        
+        # Playback & Annotation because thepage has its own controls
+        self.sidebar_stack.addWidget(PlaybackSidebar(self.playback_page))
 
         self.on_top_tab_changed(0)
         self.on_workflow_tab_changed(0)
@@ -379,16 +387,42 @@ class AnalyticsWindow(QMainWindow):
         layout.addWidget(self.visualization_table, 1)
         self.main_stack.addWidget(page)
 
+    # def on_top_tab_changed(self, index):
+    #     if index != 0:
+    #         QMessageBox.information(
+    #             self,
+    #             "Coming Soon",
+    #             "This section is ready in the shell and will be connected as model and result workflows are added.",
+    #         )
+    #         self.top_tabs["buttons"][0].setChecked(True)
+    #         return
+    #     self.top_tabs["buttons"][index].setChecked(True)
+    
+    # Added for now for demo
     def on_top_tab_changed(self, index):
-        if index != 0:
-            QMessageBox.information(
-                self,
-                "Coming Soon",
-                "This section is ready in the shell and will be connected as model and result workflows are added.",
-            )
-            self.top_tabs["buttons"][0].setChecked(True)
-            return
         self.top_tabs["buttons"][index].setChecked(True)
+
+        if index == 3:
+            # Playback & Annotation tab
+            self.main_stack.setCurrentIndex(4)
+            self.sidebar_stack.setCurrentIndex(4)
+            return
+
+        if index == 0:
+            # Data & Features tab
+            self.main_stack.setCurrentIndex(0)
+            self.sidebar_stack.setCurrentIndex(0)
+            self.workflow_tabs["buttons"][0].setChecked(True)
+            return
+
+        QMessageBox.information(
+            self,
+            "Coming Soon",
+            "This section is ready in the shell and will be connected as model and result workflows are added.",
+        )
+        self.top_tabs["buttons"][0].setChecked(True)
+        self.main_stack.setCurrentIndex(0)
+        self.sidebar_stack.setCurrentIndex(0)
 
     def on_workflow_tab_changed(self, index):
         """Switch the visible sidebar/page pair for the selected workflow tab."""
