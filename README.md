@@ -33,14 +33,14 @@ To run locally:
 > [!NOTE] 
 > When a task is completed please use `~~ Word ~~` for a strike through so we know what has been completed.
 
-- Error when loading an icp file that has sheets or other datasets~
-    - Error reads as no module named py arrow when uploading
-    - Likely causes are the JSON or the upload function
-- Need to implement crtl+s and a save button to save the process
-    - If a user saves with having created a project a window should prompt to enter the project name
-    - If a user closes the application without saving or creating a project, need a prompt window as well
-    - If a user saves a project with the same name as another need to prompt for an override
-    - Need to include exporting
+~~- Error when loading an icp file that has sheets or other datasets~~
+    ~~- Error reads as no module named py arrow when uploading~~
+    ~~- Likely causes are the JSON or the upload function~~
+~~- Need to implement crtl+s and a save button to save the process~~
+    ~~- If a user saves with having created a project a window should prompt to enter the project name~~
+    ~~- If a user closes the application without saving or creating a project, need a prompt window as well~~
+    ~~- If a user saves a project with the same name as another need to prompt for an override~~
+    ~~- Need to include exporting~~
 - Look into removing duplicates and missing cells
     - When you highlight the metric on the right table the rows should be highlighted
     - Right click the metric to go next and have a remove option

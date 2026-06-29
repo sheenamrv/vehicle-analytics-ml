@@ -4,14 +4,55 @@ import zipfile
 import tempfile
 from pathlib import Path
 
-def save_project(project, original_df, mod_df):
+import pandas as pd
+from pandas.api.types import (
+    is_datetime64_any_dtype,
+    is_extension_array_dtype,
+    is_timedelta64_dtype,
+)
+
+
+def _sanitize_dataframe_for_pickle(df):
+    # sanitized = df.copy()
+    # for column in sanitized.columns:
+    #     dtype = sanitized[column].dtype
+    #     if is_extension_array_dtype(dtype) and not (
+    #         is_datetime64_any_dtype(dtype) or is_timedelta64_dtype(dtype)
+    #     ):
+    #         sanitized[column] = sanitized[column].astype(object)
+    # return sanitized
+
+    df = df.copy()
+
+    for col in df.columns:
+        dtype = str(df[col].dtype)
+
+        if "[pyarrow]" in dtype:
+            if dtype.startswith("string"):
+                df[col] = df[col].astype("object")
+            elif dtype.startswith("int"):
+                df[col] = df[col].astype("Int64")
+            elif dtype.startswith("float"):
+                df[col] = df[col].astype("float64")
+            elif dtype.startswith("bool"):
+                df[col] = df[col].astype("boolean")
+            else:
+                df[col] = df[col].astype("object")
+
+    return df
+
+
+def save_project(project, original_df, mod_df, target_path=None):
 
     project_name = project["project_name"]
-    # project_dir = Path("Projects") / project_name
+    if target_path is None:
+        icp_path = Path.home() / "Downloads" / f"{project_name}.icp"
+    else:
+        icp_path = Path(target_path)
+        if icp_path.suffix.lower() != ".icp":
+            icp_path = icp_path.with_suffix(".icp")
 
-    # project_dir.mkdir(parents=True, exist_ok=True)
-
-    icp_path = Path(f"Projects/{project_name}.icp")
+    icp_path.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as temp_dir:
 
@@ -58,8 +99,8 @@ def save_project(project, original_df, mod_df):
         with open(json_path, "w") as f:
             json.dump(project_copy, f, indent=4)
 
-        joblib.dump(original_df, og_path)
-        joblib.dump(mod_df, work_path)
+        joblib.dump(_sanitize_dataframe_for_pickle(original_df), og_path)
+        joblib.dump(_sanitize_dataframe_for_pickle(mod_df), work_path)
             
         # with zipfile.ZipFile(icp_path, "w", zipfile.ZIP_DEFLATED) as z:
         #     z.write(json_path, "project.json")
@@ -133,13 +174,22 @@ def load_project(icp_path):
             model_info["parameters"] = (metadata["parameters"])
             model_info["metrics"] = (metadata["metrics"])
             
-        og_df = joblib.load(
-            temp_dir / "original_data.pkl"
-        )
-
-        working_df = joblib.load(
-            temp_dir / "working_data.pkl"
-        )
+        try:
+            og_df = joblib.load(
+                temp_dir / "original_data.pkl"
+            )
+            working_df = joblib.load(
+                temp_dir / "working_data.pkl"
+            )
+        except ModuleNotFoundError as error:
+            # raise ModuleNotFoundError(
+            #     f"Failed to load project data: {error}. "
+            #     "This project may contain pandas extension arrays requiring pyarrow. "
+            #     "Install pyarrow or recreate the project with compatible dtypes."
+            # ) from error
+            print(f"Missing mdoule: {error}.")
+            print(error)
+            raise
     
     return (project, og_df, working_df)
     # icp_path = Path(icp_path)

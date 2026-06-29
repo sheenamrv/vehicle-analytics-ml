@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -103,6 +103,10 @@ class AnalyticsWindow(QMainWindow):
         self.dataset = None
         self.columns = []
         self.project = None
+        self.current_project_path = None
+        self.is_dirty = False
+        self._suppress_dirty = False
+        self.downloads_dir = Path.home() / "Downloads"
         # Track original dtypes for the DTypeDelegate; start empty until a
         # dataset is loaded.
         self.original_dtypes = {}
@@ -133,14 +137,23 @@ class AnalyticsWindow(QMainWindow):
         open_dataset.triggered.connect(self.browse_dataset)
         open_project = QAction("Open Project", self)
         open_project.triggered.connect(self.browse_project)
+        save_project_action = QAction("Save Project", self)
+        save_project_action.triggered.connect(self.save_current_project)
+        save_project_action.setShortcut(QKeySequence.StandardKey.Save)
+        save_as_action = QAction("Save Project As...", self)
+        save_as_action.triggered.connect(self.save_project_as)
         export_features = QAction("Export Feature Dataset", self)
         export_features.triggered.connect(self.export_features)
 
         file_menu = self.menuBar().addMenu("File")
         file_menu.addAction(open_dataset)
         file_menu.addAction(open_project)
+        file_menu.addAction(save_project_action)
+        file_menu.addAction(save_as_action)
         file_menu.addSeparator()
         file_menu.addAction(export_features)
+
+        # Single QAction handles the Save shortcut; avoid QShortcut duplicate.
 
 # ============================================================================
 # Main UI Construction
@@ -241,6 +254,7 @@ class AnalyticsWindow(QMainWindow):
         self.project_name = QLineEdit()
         self.project_name.setMinimumWidth(210)
         self.project_name.setPlaceholderText("Project name")
+        self.project_name.textChanged.connect(self.on_project_name_changed)
         layout.addWidget(QLabel("Project Name"))
         layout.addWidget(self.project_name)
 
@@ -500,6 +514,34 @@ class AnalyticsWindow(QMainWindow):
             self.refresh_visualization_summary()
             self.render_visualization()
 
+    def _set_dirty(self, dirty=True):
+        if self._suppress_dirty and dirty:
+            return
+        self.is_dirty = dirty
+        icon = "• " if dirty else ""
+        title = self.project.get("project_name") if self.project else "Classify & Learn Lab"
+        self.setWindowTitle(f"{icon}{title}")
+
+    def on_project_name_changed(self, text):
+        if self._suppress_dirty:
+            return
+        if self.project or self.file_path or self.current_project_path:
+            self._set_dirty(True)
+
+    def closeEvent(self, event):
+        if self.is_dirty:
+            result = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                "You have unsaved changes. Do you want to exit without saving?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if result == QMessageBox.StandardButton.No:
+                event.ignore()
+                return
+        event.accept()
+
 # ============================================================================
 # Dataset & Project Loading
 # ============================================================================
@@ -508,16 +550,22 @@ class AnalyticsWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Dataset",
-            str(Path.home() / "Downloads"),
+            str(self.downloads_dir),
             "Supported Files (*.csv *.xlsx *.xls *.mat);;CSV Files (*.csv);;Excel Files (*.xlsx *.xls);;MATLAB Files (*.mat)",
         )
         if not path:
             return
 
         self.file_path = Path(path)
+        self.current_project_path = None
+        self.project = None
+        self.project_name.clear()
+        self._suppress_dirty = True
         try:
             datasets = get_datasets(self.file_path)
         except Exception as error:
+            self._suppress_dirty = False
+            self._set_dirty(False)
             self.show_error("Dataset Error", error)
             return
 
@@ -533,15 +581,15 @@ class AnalyticsWindow(QMainWindow):
         if datasets:
             self.dataset = datasets[0]
             self.load_dataset_metadata()
+        self._suppress_dirty = False
+        self._set_dirty(False)
 
     def browse_project(self):
         """Open an ICP project and restore the saved frontend state."""
-        project_dir = Path("Projects")
-        project_dir.mkdir(exist_ok=True)
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Project",
-            str(project_dir.resolve()),
+            str(self.downloads_dir),
             "ICP Project Files (*.icp);;All Files (*.*)",
         )
         if not path:
@@ -553,9 +601,11 @@ class AnalyticsWindow(QMainWindow):
             self.show_error("Project Error", error)
             return
 
+        self.current_project_path = Path(path)
         self.file_path = Path(self.project.get("file_path", ""))
         self.dataset = self.project.get("dataset", "Data")
         self.columns = list(self.og_df.columns)
+        self._suppress_dirty = True
         self.project_name.setText(self.project.get("project_name", ""))
 
         # Populate original_dtypes in-place so delegates stay in sync.
@@ -570,6 +620,8 @@ class AnalyticsWindow(QMainWindow):
 
         self.populate_column_controls()
         self.refresh_import_tables()
+        self._suppress_dirty = False
+        self._set_dirty(False)
         QMessageBox.information(self, "Project Loaded", "Project loaded successfully.")
 
     def on_dataset_changed(self, dataset):
@@ -615,8 +667,15 @@ class AnalyticsWindow(QMainWindow):
         if self.project:
             selected = self.project.get("selected_columns", self.columns)
             label = self.project.get("label_column")
-            self.column_picker.set_selected(selected)
-            self.signal_picker.set_selected(selected)
+            # Prevent programmatic selection from marking the project dirty.
+            self.column_picker.blockSignals(True)
+            self.signal_picker.blockSignals(True)
+            try:
+                self.column_picker.set_selected(selected)
+                self.signal_picker.set_selected(selected)
+            finally:
+                self.column_picker.blockSignals(False)
+                self.signal_picker.blockSignals(False)
             if label:
                 index = self.label_combo.findText(label)
                 if index >= 0:
@@ -644,6 +703,7 @@ class AnalyticsWindow(QMainWindow):
         else:
             self.working_df = self.og_df[columns].copy()
 
+        self._set_dirty(True)
         self.refresh_import_tables()
         self.populate_visualization_controls()
 
@@ -685,13 +745,94 @@ class AnalyticsWindow(QMainWindow):
                 "visualizations": [],
                 "models": [],
             }
-            save_project(self.project, self.og_df, self.working_df)
+            if self.current_project_path is None:
+                self.current_project_path = self._choose_project_save_path(default_name=project_name)
+                if self.current_project_path is None:
+                    return
+            save_project(self.project, self.og_df, self.working_df, str(self.current_project_path))
+            self._set_dirty(False)
         except Exception as error:
             self.show_error("Save Error", error)
             return
 
         self.refresh_import_tables()
-        QMessageBox.information(self, "Project Created", f"Saved Projects/{project_name}.icp")
+        QMessageBox.information(self, "Project Created", f"Saved {self.current_project_path}")
+
+    def save_current_project(self):
+        if self.project is None:
+            QMessageBox.warning(self, "No Project", "Create or open a project before saving.")
+            return
+
+        if self.current_project_path is None:
+            self.save_project_as()
+            return
+
+        try:
+            # Update project metadata from current workspace before saving
+            self.project["selected_columns"] = list(self.working_df.columns)
+            self.project["column_types"] = {col: str(self.working_df[col].dtype) for col in self.working_df.columns}
+            self.project["file_path"] = str(self.file_path) if self.file_path is not None else self.project.get("file_path")
+            save_project(self.project, self.og_df, self.working_df, str(self.current_project_path))
+            self._set_dirty(False)
+            QMessageBox.information(self, "Project Saved", f"Saved {self.current_project_path}")
+        except Exception as error:
+            self.show_error("Save Error", error)
+
+    def save_project_as(self):
+        if self.project is None:
+            QMessageBox.warning(self, "No Project", "Create or open a project before saving.")
+            return
+
+        project_name = self.project.get("project_name") or self.project_name.text().strip() or "project"
+        chosen_path = self._choose_project_save_path(default_name=project_name)
+        if chosen_path is None:
+            return
+
+        try:
+            # Update metadata on the active project before saving a copy.
+            self.project["selected_columns"] = list(self.working_df.columns)
+            self.project["column_types"] = {col: str(self.working_df[col].dtype) for col in self.working_df.columns}
+            self.project["file_path"] = str(self.file_path) if self.file_path is not None else self.project.get("file_path")
+
+            # Save a copy under the chosen path, but keep the active project bound
+            # to the original project for future saves.
+            project_copy = dict(self.project)
+            project_copy["project_name"] = chosen_path.stem
+            save_project(project_copy, self.og_df, self.working_df, str(chosen_path))
+            self._set_dirty(False)
+            QMessageBox.information(self, "Project Saved", f"Saved {chosen_path}")
+        except Exception as error:
+            self.show_error("Save Error", error)
+
+    def _choose_project_save_path(self, default_name=None):
+        default_name = default_name or "project"
+        default_file = self.downloads_dir / f"{default_name}.icp"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Project As",
+            str(default_file),
+            "ICP Project Files (*.icp)",
+        )
+        if not path:
+            return None
+
+        chosen_path = Path(path)
+        if chosen_path.suffix.lower() != ".icp":
+            chosen_path = chosen_path.with_suffix(".icp")
+
+        # if chosen_path.exists():
+        #     result = QMessageBox.question(
+        #         self,
+        #         "Overwrite Project",
+        #         f"A project named '{chosen_path.name}' already exists. Overwrite it?",
+        #         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        #         QMessageBox.StandardButton.No,
+        #     )
+        #     if result == QMessageBox.StandardButton.No:
+        #         return None
+
+        chosen_path.parent.mkdir(parents=True, exist_ok=True)
+        return chosen_path
 
 # ============================================================================
 # Import Page Refresh
