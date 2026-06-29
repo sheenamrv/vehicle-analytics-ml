@@ -1,5 +1,12 @@
 import pandas as pd
 
+'''
+    Contains helper functions that generate summary tables displayed for the front end.
+    Only prepare pandas Dataframe, do not modify the original dataset.
+'''
+
+## Returns overall dataset summary for the Import and Visualization tab
+## Add new summary metric here
 
 def file_summary(df):
     """Build the compact dataset summary shown in the Import and Visualization tabs."""
@@ -17,7 +24,8 @@ def file_summary(df):
         columns=["metric", "value"],
     )
 
-
+## Returns a table describing each column
+## Add new per-column diagnostics here
 def missing_summary(df):
     """Build per-column missing-value diagnostics for the Import tab."""
     if df.empty:

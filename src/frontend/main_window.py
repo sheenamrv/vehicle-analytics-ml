@@ -46,6 +46,13 @@ from src.frontend.widgets import (
 )
 
 
+'''
+    Main font end window for the application
+'''
+
+# ============================================================================
+# Constants
+# ============================================================================
 FEATURES = [
     # Extension point: add/remove selectable summary metrics here.
     # Names should match keys returned by src.feature.feature_extract().
@@ -77,10 +84,16 @@ CHART_TYPES = [
     "Grouped Box Plot",
 ]
 
+# ============================================================================
+# Main Application Window
+# ============================================================================
 
 class AnalyticsWindow(QMainWindow):
     """Main desktop window and shared frontend state."""
 
+# ============================================================================
+# Window Initialization
+# ============================================================================
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Classify & Learn Lab")
@@ -111,6 +124,10 @@ class AnalyticsWindow(QMainWindow):
         self._build_menu()
         apply_app_styles(self)
 
+# ============================================================================
+# Menu Bar
+# ============================================================================
+
     def _build_menu(self):
         open_dataset = QAction("Open Dataset", self)
         open_dataset.triggered.connect(self.browse_dataset)
@@ -124,6 +141,10 @@ class AnalyticsWindow(QMainWindow):
         file_menu.addAction(open_project)
         file_menu.addSeparator()
         file_menu.addAction(export_features)
+
+# ============================================================================
+# Main UI Construction
+# ============================================================================
 
     def _build_ui(self):
         """Build the shell: sidebars on the left, pages on the right."""
@@ -175,6 +196,10 @@ class AnalyticsWindow(QMainWindow):
 
         self.on_top_tab_changed(0)
         self.on_workflow_tab_changed(0)
+
+# ============================================================================
+# Sidebar Construction
+# ============================================================================
 
     def _import_sidebar(self):
         """Build controls for opening datasets/projects and defining label/features."""
@@ -310,6 +335,9 @@ class AnalyticsWindow(QMainWindow):
         layout.addStretch()
         return panel
 
+# ============================================================================
+# Workflow Page Construction
+# ============================================================================
     def _build_import_page(self):
         """Build file preview, summary, and data-quality panels."""
         page = QWidget()
@@ -366,6 +394,9 @@ class AnalyticsWindow(QMainWindow):
         layout.setRowStretch(2, 1)
         self.main_stack.addWidget(page)
 
+    # ============================================================================
+    # Data Type Conversion
+    # ============================================================================
     def change_column_type(self, column_name, new_dtype):
 
         print(f"Changing {column_name} to {new_dtype}...")
@@ -445,6 +476,10 @@ class AnalyticsWindow(QMainWindow):
         layout.addWidget(self.visualization_table, 1)
         self.main_stack.addWidget(page)
 
+# ============================================================================
+# Navigation & Tab Management
+# ============================================================================
+
     def on_top_tab_changed(self, index):
         if index != 0:
             QMessageBox.information(
@@ -465,6 +500,9 @@ class AnalyticsWindow(QMainWindow):
             self.refresh_visualization_summary()
             self.render_visualization()
 
+# ============================================================================
+# Dataset & Project Loading
+# ============================================================================
     def browse_dataset(self):
         """Open a dataset and populate controls from its columns."""
         path, _ = QFileDialog.getOpenFileName(
@@ -609,6 +647,10 @@ class AnalyticsWindow(QMainWindow):
         self.refresh_import_tables()
         self.populate_visualization_controls()
 
+# ============================================================================
+# Project Management
+# ============================================================================
+
     def create_project(self):
         """Persist the selected dataset configuration as an ICP project."""
         if self.og_df.empty:
@@ -651,6 +693,10 @@ class AnalyticsWindow(QMainWindow):
         self.refresh_import_tables()
         QMessageBox.information(self, "Project Created", f"Saved Projects/{project_name}.icp")
 
+# ============================================================================
+# Import Page Refresh
+# ============================================================================
+
     def refresh_import_tables(self):
         """Refresh import-tab preview, summary, missing table, and missing chart."""
         df = self.working_df if not self.working_df.empty else self.og_df
@@ -659,6 +705,9 @@ class AnalyticsWindow(QMainWindow):
         self.missing_model.set_data(missing_summary(df))
         self.missing_chart.plot_missing_values(df)
 
+    # ============================================================================
+    # Feature Extraction
+    # ============================================================================
     def extract_features(self):
         """Run the existing feature_extract helper for selected columns."""
         df = self.working_df if not self.working_df.empty else self.og_df
@@ -715,6 +764,9 @@ class AnalyticsWindow(QMainWindow):
 
         QMessageBox.information(self, "Export Complete", f"Saved {path}")
 
+    # ============================================================================
+    # Analysis
+    # ============================================================================
     def show_correlation(self):
         """Run correlation analysis and show matrix plus heatmap."""
         df = self.working_df if not self.working_df.empty else self.og_df
@@ -780,6 +832,10 @@ class AnalyticsWindow(QMainWindow):
         self.analysis_model.set_data(result.round(4))
         self.analysis_chart.plot_mutual_information(result)
         self.on_workflow_tab_changed(2)
+
+    # ============================================================================
+    # Visualization
+    # ============================================================================
 
     def refresh_visualization_summary(self):
         """Refresh the small project/dataset summary under the Visualization chart."""
@@ -852,5 +908,8 @@ class AnalyticsWindow(QMainWindow):
             return []
         return [str(col) for col in df.select_dtypes(include="number").columns]
 
+    # ============================================================================
+    # Utility Functions
+    # ============================================================================
     def show_error(self, title, error):
         QMessageBox.critical(self, title, str(error))

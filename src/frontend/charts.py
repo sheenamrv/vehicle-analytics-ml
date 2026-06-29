@@ -20,7 +20,9 @@ import pandas as pd
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
-
+'''
+    Central location for every chart rendered by the application
+'''
 class ChartCanvas(FigureCanvasQTAgg):
     """Reusable matplotlib canvas for all frontend chart areas."""
 

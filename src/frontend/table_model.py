@@ -1,7 +1,9 @@
 import pandas as pd
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
 
-
+'''
+    Provides a Qt table model that allows pandas DataFrames to be displayed inside the QTableView widgets
+'''
 class PandasTableModel(QAbstractTableModel):
     """Expose a pandas DataFrame through Qt's table model interface."""
 

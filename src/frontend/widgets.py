@@ -21,6 +21,9 @@ SIDEBAR_WIDTH = 280
 DROPDOWN_MIN_HEIGHT = 32
 
 
+'''
+    Contains reusable frontend widgets and helper functions used throughout the application
+'''
 class ColumnPicker(QWidget):
     """Searchable checkbox list for column/feature selection."""
 
