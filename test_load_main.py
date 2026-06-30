@@ -332,7 +332,7 @@ if __name__ == "__main__":
                 f"{project_name}.icp"
             )
 
-            project, og_df, working_df = (
+            project, og_df, working_df, feature_df = (
                 load_project(
                     icp_path
                 )

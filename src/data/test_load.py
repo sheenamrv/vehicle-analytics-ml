@@ -49,7 +49,11 @@ def select_col(file, dataset, cols):
     file_ext = Path(file).suffix.lower()
 
     if file_ext == ".csv":
-        return pd.read_csv(file, usecols=cols)
+        try:
+            return pd.read_csv(file, usecols=cols)
+        except MemoryError:
+            chunks = pd.read_csv(file, usecols=cols, chunksize=100000)
+            return pd.concat(chunks, ignore_index=True)
     elif file_ext in [".xlsx", ".xls"]:
         return pd.read_excel(file, sheet_name=dataset, usecols=cols)
     elif file_ext == ".mat":
@@ -136,7 +140,7 @@ def change_dtype(working_df, col, dtype):
         if dtype in ["int", "int64"]:
             working_df[col] = (pd.to_numeric(working_df[col], errors="raise").astype("Int64"))
         elif dtype in ["float", "float64"]:
-            working_df[col] = pd.to_numeric(working_df[col], errors="raise")
+            working_df[col] = pd.to_numeric(working_df[col], errors="raise").astype("float64")
         elif dtype in ["string", "object"]:
             working_df[col] = working_df[col].astype("string")
         elif dtype in ["bool", "boolean"]:

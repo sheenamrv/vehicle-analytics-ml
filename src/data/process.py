@@ -42,7 +42,7 @@ def _sanitize_dataframe_for_pickle(df):
     return df
 
 
-def save_project(project, original_df, mod_df, target_path=None):
+def save_project(project, original_df, mod_df, target_path=None, feature_df=None):
 
     project_name = project["project_name"]
     if target_path is None:
@@ -61,6 +61,7 @@ def save_project(project, original_df, mod_df, target_path=None):
         json_path = temp_dir / "project.json"
         og_path = temp_dir / "original_data.pkl"
         work_path = temp_dir / "working_data.pkl"
+        feature_path = temp_dir / "feature_data.pkl"
         
         models_dir = temp_dir / "models"
         models_dir.mkdir(exist_ok=True)
@@ -96,6 +97,14 @@ def save_project(project, original_df, mod_df, target_path=None):
             
             project_copy["models"].append(model_copy)
             
+        if feature_df is not None and not feature_df.empty:
+            joblib.dump(_sanitize_dataframe_for_pickle(feature_df), feature_path)
+            project_copy["feature_file"] = "feature_data.pkl"
+            project_copy["has_feature_data"] = True
+        else:
+            project_copy["has_feature_data"] = False
+            project_copy["feature_file"] = None
+
         with open(json_path, "w") as f:
             json.dump(project_copy, f, indent=4)
 
@@ -181,6 +190,9 @@ def load_project(icp_path):
             working_df = joblib.load(
                 temp_dir / "working_data.pkl"
             )
+            feature_df = pd.DataFrame()
+            if project.get("has_feature_data") and project.get("feature_file"):
+                feature_df = joblib.load(temp_dir / project["feature_file"])
         except ModuleNotFoundError as error:
             # raise ModuleNotFoundError(
             #     f"Failed to load project data: {error}. "
@@ -191,7 +203,7 @@ def load_project(icp_path):
             print(error)
             raise
     
-    return (project, og_df, working_df)
+    return (project, og_df, working_df, feature_df)
     # icp_path = Path(icp_path)
 
     # parent = icp_path.parent
