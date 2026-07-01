@@ -5,11 +5,6 @@ import tempfile
 from pathlib import Path
 
 import pandas as pd
-from pandas.api.types import (
-    is_datetime64_any_dtype,
-    is_extension_array_dtype,
-    is_timedelta64_dtype,
-)
 
 
 def _sanitize_dataframe_for_pickle(df):
