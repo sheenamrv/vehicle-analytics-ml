@@ -210,12 +210,12 @@ def allowed_dtypes(current_dtype):
 
     mapping = {
         "int64": ["int64", "float64", "string"],
-        "Int64": ["int64", "float64", "string"],
-        "float64": ["float64", "int64", "string"],
+        "Int64": ["Int64", "float64", "string"],
+        "float64": ["float64", "Int64", "string"],
         "string": ["string"],
         "object": ["string"],
         "boolean": ["boolean", "string"],
-        "bool": ["boolean", "string"]
+        "bool": ["bool", "boolean", "string"],
     }
 
     return mapping.get(
