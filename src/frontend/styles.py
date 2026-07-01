@@ -9,7 +9,9 @@ MUTED = "#6b7280"
 BORDER = "#d7dbe0"
 BG = "#fbfbfa"
 
-
+'''
+    Defines the application's global QT stylesheet and shared colour palette.
+'''
 def apply_app_styles(window):
     """Apply the app-wide Qt stylesheet.
 

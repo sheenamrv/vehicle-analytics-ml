@@ -137,13 +137,14 @@ def load_page():
 
             st.write("Before load_project")
 
-            project, og_df, working_df = load_project(st.session_state["selected_project"])
+            project, og_df, working_df, feature_df = load_project(st.session_state["selected_project"])
 
             st.write("After load_project")
 
             st.session_state.project = project
             st.session_state.og_df = og_df
             st.session_state.working_df = working_df
+            st.session_state.feature_df = feature_df
 
             st.success("Project loaded")
             # st.rerun()

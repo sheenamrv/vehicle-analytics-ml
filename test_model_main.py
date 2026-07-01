@@ -251,7 +251,7 @@ def test_load_project():
 
     try:
 
-        project, og_df, working_df = (
+        project, og_df, working_df, feature_df = (
             load_project(
                 icp_path
             )
