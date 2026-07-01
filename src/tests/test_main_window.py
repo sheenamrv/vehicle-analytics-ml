@@ -41,7 +41,9 @@ def test_save_project_as_saves_copy_without_changing_active_project(monkeypatch,
         return tmp_path / "copy.icp"
 
     def fake_save_project(project, original_df, mod_df, target_path=None, feature_df=None):
-
+        saved["project"] = project
+        saved["target_path"] = target_path
+        saved["feature_df"] = feature_df
     monkeypatch.setattr(window, "_choose_project_save_path", fake_choose_project_save_path)
     monkeypatch.setattr(main_window, "save_project", fake_save_project)
 
