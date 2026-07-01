@@ -1584,7 +1584,7 @@ class AnalyticsWindow(QMainWindow):
     def save_project_as(self):
         if self.project is None:
             QMessageBox.warning(self, "No Project", "Create or open a project before saving.")
-            return
+            return False
 
         project_name = self.project.get("project_name") or self.project_name.text().strip() or "project"
         chosen_path = self._choose_project_save_path(default_name=project_name)
