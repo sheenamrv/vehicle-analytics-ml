@@ -601,9 +601,11 @@ class AnalyticsWindow(QMainWindow):
 
     def populate_column_controls(self):
         """Refresh every control whose choices come from dataset columns."""
-        self.column_picker.set_items(self.columns, checked=True)
         self.column_picker.blockSignals(True)
+        self.signal_picker.blockSignals(True)
+        self.column_picker.set_items(self.columns, checked=True)
         self.signal_picker.set_items(self.columns, checked=True)
+        self.signal_picker.blockSignals(False)
         self.column_picker.blockSignals(False)
 
         self.label_combo.clear()
