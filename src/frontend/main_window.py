@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -249,7 +250,7 @@ class AnalyticsWindow(QMainWindow):
         layout.addWidget(extract_button)
 
         import_features = secondary_button("Import Feature Dataset")
-        import_features.clicked.connect(self.browse_dataset)
+        import_features.clicked.connect(self.browse_feature_dataset)
         layout.addWidget(import_features)
 
         export_features = secondary_button("Export Feature Dataset")
@@ -496,6 +497,50 @@ class AnalyticsWindow(QMainWindow):
             self.dataset = datasets[0]
             self.load_dataset_metadata()
 
+    def browse_feature_dataset(self):
+        """Import a precomputed feature table without replacing the raw dataset."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Feature Dataset",
+            str(Path.home() / "Downloads"),
+            "Supported Files (*.csv *.xlsx *.xls *.mat);;CSV Files (*.csv);;Excel Files (*.xlsx *.xls);;MATLAB Files (*.mat)",
+        )
+        if not path:
+            return
+
+        try:
+            datasets = get_datasets(path)
+            if not datasets:
+                QMessageBox.warning(
+                    self,
+                    "Feature Dataset Error",
+                    "No datasets found in the selected file.",
+                )
+                return
+
+            dataset = datasets[0]
+            if len(datasets) > 1:
+                dataset, accepted = QInputDialog.getItem(
+                    self,
+                    "Select Feature Dataset",
+                    "Dataset",
+                    datasets,
+                    0,
+                    False,
+                )
+                if not accepted:
+                    return
+
+            columns = get_available_columns(path, dataset)
+            feature_df = select_col(path, dataset, columns)
+        except Exception as error:
+            self.show_error("Feature Dataset Error", error)
+            return
+
+        self.feature_df = feature_df
+        self.refresh_feature_tables()
+        self.on_workflow_tab_changed(1)
+
     def browse_project(self):
         """Open an ICP project and restore the saved frontend state."""
         project_dir = Path("Projects")
@@ -686,14 +731,22 @@ class AnalyticsWindow(QMainWindow):
             rows.append(row)
 
         self.feature_df = pd.DataFrame(rows)
+        self.refresh_feature_tables()
+        self.on_workflow_tab_changed(1)
+
+    def refresh_feature_tables(self):
+        """Refresh the feature dataset preview and summary models."""
         self.feature_preview_model.set_data(self.feature_df)
         self.feature_summary_model.set_data(file_summary(self.feature_df))
-        self.on_workflow_tab_changed(1)
 
     def export_features(self):
         """Export the current feature table to CSV."""
         if self.feature_df.empty:
-            QMessageBox.warning(self, "Missing Features", "Extract features before exporting.")
+            QMessageBox.warning(
+                self,
+                "Missing Features",
+                "Extract or import features before exporting.",
+            )
             return
 
         default_path = Path("ExportedModels") / "feature_dataset.csv"
