@@ -1580,11 +1580,10 @@ class AnalyticsWindow(QMainWindow):
                 str(chosen_path),
                 feature_df=self.feature_df.copy(),
             )
-            self.current_project_path = chosen_path
+            # Keep the active project path unchanged when saving a copy.
             self._set_dirty(False)
             QMessageBox.information(self, "Project Saved", f"Saved {chosen_path}")
             return True
-        except Exception as error:
             self.show_error("Save Error", error)
             return False
 
