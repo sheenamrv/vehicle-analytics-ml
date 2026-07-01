@@ -1615,6 +1615,7 @@ class AnalyticsWindow(QMainWindow):
             self._set_dirty(False)
             QMessageBox.information(self, "Project Saved", f"Saved {chosen_path}")
             return True
+        except Exception as error:
             self.show_error("Save Error", error)
             return False
 
