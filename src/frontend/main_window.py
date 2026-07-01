@@ -730,22 +730,6 @@ class AnalyticsWindow(QMainWindow):
                 return converted.replace({"True": True, "False": False}).astype("boolean")
             return series.astype("boolean")
         return series.astype(canonical)
-        if dtype in ["int", "int64"]:
-            if coerce:
-                return pd.to_numeric(series, errors="coerce").astype("Int64")
-            return pd.to_numeric(series, errors="raise").astype("Int64")
-        if dtype in ["float", "float64"]:
-            if coerce:
-                return pd.to_numeric(series, errors="coerce")
-            return pd.to_numeric(series, errors="raise")
-        if dtype in ["string", "object"]:
-            return series.astype("string")
-        if dtype in ["bool", "boolean"]:
-            if coerce:
-                converted = series.astype("string")
-                return converted.replace({"True": True, "False": False}).astype("boolean")
-            return series.astype("boolean")
-        return series.astype(dtype)
 
     def _build_feature_page(self):
         page = QWidget()
