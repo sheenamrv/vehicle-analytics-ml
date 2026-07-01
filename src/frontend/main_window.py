@@ -369,9 +369,6 @@ class AnalyticsWindow(QMainWindow):
 
     def change_column_type(self, column_name, new_dtype):
 
-        print(f"Changing {column_name} to {new_dtype}...")
-        old_dtype = str(self.working_df[column_name].dtype)
-
         try:
 
             self.working_df = change_dtype(
@@ -380,11 +377,6 @@ class AnalyticsWindow(QMainWindow):
                 new_dtype
             )
 
-            print(self.working_df.dtypes)
-            # Update recorded original dtypes so delegates and UI stay in sync.
-            self.original_dtypes[column_name] = new_dtype
-            if hasattr(self, "dtype_delegate"):
-                self.dtype_delegate.original_dtypes = self.original_dtypes
             self.refresh_import_tables()
 
         except Exception as e:
