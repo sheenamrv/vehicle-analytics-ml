@@ -998,7 +998,7 @@ class AnalyticsWindow(QMainWindow):
 
         worker = DataLoadWorker(self.file_path, self.dataset, self.columns)
         worker.signals.finished.connect(self.on_dataset_loaded)
-        worker.signals.error.connect(self.show_error)
+        worker.signals.error.connect(lambda err: self.show_error("Load Error", err))
         self.thread_pool.start(worker)
 
     def on_dataset_loaded(self, df):
