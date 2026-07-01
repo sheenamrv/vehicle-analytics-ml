@@ -3,9 +3,7 @@ openpyxl
 joblib
 scikit-learn
 matplotlib
-streamlit
 pyinstaller
-pywebview
-requests
 mrmr-selection
 pytest
+PySide6

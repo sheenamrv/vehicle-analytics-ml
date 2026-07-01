@@ -1,8 +1,16 @@
-import streamlit as st
-import pages.load_page.load_data as load_data
-from src.data.test_load import *
+import sys
 
-st.title("Testing Windows Executable")
-st.write("By: Andrianna")
+from PySide6.QtWidgets import QApplication
 
-load_data.load_page()
+from src.frontend.main_window import AnalyticsWindow
+
+
+def main():
+    app = QApplication(sys.argv)
+    window = AnalyticsWindow()
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

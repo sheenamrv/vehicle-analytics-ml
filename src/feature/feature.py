@@ -18,7 +18,8 @@ def feature_extract(df, cols):
 
     for col in cols:
 
-        signal = df[col]
+        get_signal = df[col]
+        signal = get_signal.dropna()
 
         total_row = int(len(signal))
         total_non_null = int(signal.count())
