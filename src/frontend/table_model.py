@@ -43,7 +43,10 @@ class PandasTableModel(QAbstractTableModel):
     def flags(self, index):
         flags = super().flags(index)
 
-        if (len(self._data.columns) > 1 and self._data.columns[index.column()] == "dtype"):
+        if not index.isValid():
+            return flags
+
+        if self._data.columns[index.column()] == "dtype":
             return flags | Qt.ItemIsEditable
         return flags
 
