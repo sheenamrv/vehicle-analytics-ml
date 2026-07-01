@@ -41,7 +41,7 @@ def save_project(project, original_df, mod_df, target_path=None, feature_df=None
 
     project_name = project["project_name"]
     if target_path is None:
-        icp_path = Path.home() / "Downloads" / f"{project_name}.icp"
+        icp_path = Path("Projects") / f"{project_name}.icp"
     else:
         icp_path = Path(target_path)
         if icp_path.suffix.lower() != ".icp":
