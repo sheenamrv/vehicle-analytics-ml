@@ -1,63 +1,86 @@
-from sklearn.svm import SVC
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
+from src.model.model_factory import build_model
+from src.model.model_training import train_test_classifier
+from src.model.model_utils import get_rf_config, prepare_training_data
+from src.model.result_builders import build_classification_results
 
-from src.model.model_utils import get_rf_config
+# Return model parameters. If parameters is None, this falls back to the old CLI prompts
+def get_model_parameters(model_type, parameters=None):
+    if parameters is not None:
+        return parameters
 
-def build_model(model_type, parameters):
-
-    if model_type == "svm":
-        return SVC(C=parameters.get("C",1.0))
-
-    elif model_type == "knn":
-        return KNeighborsClassifier(n_neighbors=parameters.get("n_neighbors",5))
-
-    elif model_type == "decision_tree":
-        return DecisionTreeClassifier(max_depth=parameters.get("max_depth"))
-
-    elif model_type == "random_forest":
-        return RandomForestClassifier(
-            n_estimators=parameters.get("n_estimators",100),
-            max_depth=parameters.get("max_depth"),
-            random_state=42
-        )
-
-    elif model_type == "logistic_regression":
-        return LogisticRegression(max_iter=1000)
-
-    return None
-
-def get_model_parameters(model_type):
-    
     if model_type == "random_forest":
         return get_rf_config()
-    elif model_type == "knn":
-        
+
+    if model_type == "knn":
         neighbours = input("Number of neighbors [5]: ").strip()
-        
-        return {
-            "n_neighbors" : int(neighbours) if neighbours else 5
-        }
-        
-    elif model_type == "svm":
-        
+        return {"n_neighbors": int(neighbours) if neighbours else 5}
+
+    if model_type == "svm":
         c = input("C value [1.0]: ").strip()
-        
-        return {
-            "C" : float(c) if c else 1.0
-        }
-    
-    elif model_type == "decision_tree":
-        
+        return {"C": float(c) if c else 1.0}
+
+    if model_type == "decision_tree":
         depth = input("Max depth [None]: ").strip()
-        
+        return {"max_depth": int(depth) if depth else None}
+
+    if model_type == "logistic_regression":
+        c = input("C value [1.0]: ").strip()
+        max_iter = input("Max iterations [1000]: ").strip()
         return {
-            "max_depth" : int(depth) if depth else None
+            "C": float(c) if c else 1.0,
+            "max_iter": int(max_iter) if max_iter else 1000,
         }
-        
+
     return {}
 
 
-    
+def run_supervised_workflow(
+    df,
+    label_col,
+    model_type,
+    parameters=None,
+    features=None,
+    test_size=0.3,
+    random_state=42,
+    fill_method="median",
+    fill_value=None,
+    stratify=False,
+):
+    parameters = parameters or {}
+    X, y = prepare_training_data(
+        df=df,
+        label_col=label_col,
+        features=features,
+        fill_method=fill_method,
+        fill_value=fill_value,
+    )
+
+    model = build_model(
+        model_type=model_type,
+        parameters=parameters,
+        random_state=random_state,
+    )
+
+    trained = train_test_classifier(
+        model=model,
+        X=X,
+        y=y,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=stratify,
+    )
+
+    result = build_classification_results(
+        model=trained["model"],
+        X_test=trained["X_test"],
+        y_test=trained["y_test"],
+        predictions=trained["predictions"],
+        feature_columns=X.columns.tolist(),
+    )
+    result.update({
+        "model_type": model_type,
+        "parameters": parameters,
+        "X_test": trained["X_test"],
+        "y_test": trained["y_test"],
+    })
+    return result
