@@ -1,9 +1,0 @@
-pandas
-openpyxl
-joblib
-scikit-learn
-matplotlib
-pyinstaller
-mrmr-selection
-pytest
-PySide6
