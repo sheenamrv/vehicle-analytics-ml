@@ -1,6 +1,7 @@
 import json
 import joblib
 from pathlib import Path
+import pandas as pd
 
 from src.model.model_utils import prepare_training_data
 

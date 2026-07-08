@@ -1,199 +1,262 @@
 from sklearn.model_selection import train_test_split
-
-from src.evaluation.metrics import (
-    classification_confusion_matrix,
-    classification_metrics,
-    clustering_metrics,
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score
 )
-from src.model.model_registry import add_model, select_saved_models
+
 from src.model.model_utils import (
-    align_features,
-    get_training_config,
+    validate_dataset,
     prepare_training_data,
     select_model,
-    validate_dataset,
+    get_training_config
 )
 
-# Contains the small shared functions used for supervised, semisupervised, and unsupervised worflows
+from src.model.supervised_model import (
+    build_model,
+    get_model_parameters
+)
 
-def split_train_test(X, y, test_size=0.3, random_state=42, stratify=False):
-    stratify_values = y if stratify else None
-    return train_test_split(
-        X,
-        y,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=stratify_values,
+from src.model.model_registry import (
+    add_model,
+    select_saved_models
+)
+
+def train_model(model, X, y, config):
+
+    X_train, X_test, y_train, y_test = (
+        train_test_split(
+            X, y, test_size=config["test_size"], random_state=config["random_state"]
+        )
     )
 
+    model.fit(X_train, y_train)
 
-def fit_model(model, X, y=None):
-    if y is None:
-        model.fit(X)
+    predictions = model.predict(X_test)
+
+    metrics = {
+        "accuracy":
+            accuracy_score(
+                y_test,
+                predictions
+            ),
+        "precision":
+            precision_score(
+                y_test,
+                predictions,
+                average="weighted",
+                zero_division=0
+            ),
+        "recall":
+            recall_score(
+                y_test,
+                predictions,
+                average="weighted",
+                zero_division=0
+            ),
+        "f1":
+            f1_score(
+                y_test,
+                predictions,
+                average="weighted",
+                zero_division=0
+            )
+    }
+
+    return model, metrics
+
+def test_saved_models(project, working_df):
+    
+    models = (select_saved_models(project))
+    
+    if not models:
+        return
+    
+    print("\nTest Options")
+    print("1 - Current working dataset")
+
+    choice = input(
+        "\nChoice: "
+    ).strip()
+
+    if choice == "1":
+
+        test_models_current_data(
+            models,
+            working_df,
+            project["label_column"]
+        )
+
     else:
-        model.fit(X, y)
-    return model
 
-
-def predict_model(model, X):
-    return model.predict(X)
-
-
-def fit_predict_model(model, X):
-    if hasattr(model, "fit_predict"):
-        return model.fit_predict(X)
-
-    fit_model(model, X)
-    if hasattr(model, "labels_"):
-        return model.labels_
-
-    return predict_model(model, X)
-
-
-def train_test_classifier(
-    model,
-    X,
-    y,
-    test_size=0.3,
-    random_state=42,
-    stratify=False,
-    ):
-
-    X_train, X_test, y_train, y_test = split_train_test(
-        X=X,
-        y=y,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=stratify,
-    )
-    
-    fit_model(model, X_train, y_train)
-    
-    predictions = predict_model(model, X_test)
-
-    return {
-        "model": model,
-        "X_train": X_train,
-        "X_test": X_test,
-        "y_train": y_train,
-        "y_test": y_test,
-        "predictions": predictions,
-    }
-
-
-def evaluate_classifier_predictions(y_true, y_pred):
-    return {
-        "metrics": classification_metrics(y_true, y_pred),
-        "confusion_matrix": classification_confusion_matrix(y_true, y_pred),
-        "predictions": y_pred,
-    }
-
-
-def evaluate_cluster_labels(X, cluster_labels):
-    return clustering_metrics(X, cluster_labels)
-
-# Evaluate selected saved models on a df and return results
-def evaluate_saved_models(models, df, label_col, fill_method="median", fill_value=None):
-    
-    X, y = prepare_training_data(
-        df=df,
-        label_col=label_col,
-        fill_method=fill_method,
-        fill_value=fill_value,
-    )
-
-    results = []
-    
-    for model_info in models:
-        X_test = align_features(X, model_info["feature_columns"], fill_value=0)
-        predictions = predict_model(model_info["model"], X_test)
-        evaluation = evaluate_classifier_predictions(y, predictions)
-        results.append({
-            "name": model_info["display_name"],
-            "metrics": evaluation["metrics"],
-            "confusion_matrix": evaluation["confusion_matrix"],
-            "predictions": evaluation["predictions"],
-        })
-
-    return results
-
-
-# Old functions
+        print(
+            "Invalid option."
+        )
+        
+        
 def train_new_model(project, working_df):
-    valid, message = validate_dataset(working_df, project["label_column"])
+    
+    valid, message = (
+        validate_dataset(
+            working_df,
+            project["label_column"]
+        )
+    )
+
     if not valid:
         print(message)
         return
 
-    from src.model.supervised_model import get_model_parameters, run_supervised_workflow
-
-    model_type = select_model()
-    parameters = get_model_parameters(model_type)
-    config = get_training_config()
-
-    result = run_supervised_workflow(
-        df=working_df,
-        label_col=project["label_column"],
-        model_type=model_type,
-        parameters=parameters,
-        test_size=config["test_size"],
-        random_state=config["random_state"],
+    X, y = (
+        prepare_training_data(
+            working_df,
+            project["label_column"]
+        )
     )
 
-    display_name = input("\nModel display name: ").strip()
+    feature_columns = (X.columns.tolist())
+    model_type = (
+        select_model()
+    )
+
+    parameters = (
+        get_model_parameters(
+            model_type
+        )
+    )
+
+    config = (
+        get_training_config()
+    )
+
+    model = (
+        build_model(
+            model_type,
+            parameters
+        )
+    )
+
+    trained_model, metrics = (
+        train_model(
+            model,
+            X,
+            y,
+            config
+        )
+    )
+
+    display_name = input(
+        "\nModel display name: "
+    ).strip()
+
     add_model(
         project,
-        result["model"],
+        trained_model,
         display_name,
         model_type,
-        {**config, **parameters},
-        result["metrics"],
-        result["features"],
+        {
+            **config,
+            **parameters
+        },
+        metrics,
+        feature_columns
     )
-    print("\nModel added to project.")
 
-
-def test_saved_models(project, working_df):
-    models = select_saved_models(project)
-    if not models:
-        return
-
-    print("\nTest Options")
-    print("1 - Current working dataset")
-    choice = input("\nChoice: ").strip()
-
-    if choice == "1":
-        results = evaluate_saved_models(models, working_df, project["label_column"])
-        display_test_results(results)
-    else:
-        print("Invalid option.")
-
-
+    print(
+        "\nModel added "
+        "to project."
+    )
+    
 def test_models_current_data(models, df, label_col):
-    results = evaluate_saved_models(models, df, label_col)
-    display_test_results(results)
-    return results
+    
+    X, y = prepare_training_data(df, label_col)
+    
+    results = []
+    
+    for model_info in models:
+        
+        X_test = X.reindex(columns=model_info["feature_columns"], fill_value=0)
+        
+        preds = (model_info["model"].predict(X_test))
+        
+        results.append({
+            "name":
+                model_info[
+                    "display_name"
+                ],
+            "accuracy":
+                accuracy_score(
+                    y,
+                    preds
+                ),
+            "precision":
+                precision_score(
+                    y,
+                    preds,
+                    average="weighted",
+                    zero_division=0
+                ),
+            "recall":
+                recall_score(
+                    y,
+                    preds,
+                    average="weighted",
+                    zero_division=0
+                ),
+            "f1":
+                f1_score(
+                    y,
+                    preds,
+                    average="weighted",
+                    zero_division=0
+                ),
+            "predictions":
+                preds
+        })
 
-
+    display_test_results(
+        results
+    )
+    
 def display_test_results(results):
+
     print("\n========================================")
     print("MODEL TEST RESULTS")
     print("========================================")
-    print(f"{'Model':20}{'Accuracy':>10}{'Precision':>12}{'Recall':>10}{'F1':>10}")
+
+    print(
+        f"{'Model':20}"
+        f"{'Accuracy':>10}"
+        f"{'Precision':>12}"
+        f"{'Recall':>10}"
+        f"{'F1':>10}"
+    )
+
     print("-" * 62)
 
     for r in results:
-        metrics = r.get("metrics", r)
+
         print(
             f"{r['name']:20}"
-            f"{metrics['accuracy']:10.3f}"
-            f"{metrics['precision']:12.3f}"
-            f"{metrics['recall']:10.3f}"
-            f"{metrics['f1']:10.3f}"
+            f"{r['accuracy']:10.3f}"
+            f"{r['precision']:12.3f}"
+            f"{r['recall']:10.3f}"
+            f"{r['f1']:10.3f}"
         )
 
-    show = input("\nShow first 20 predictions (y/n): ").lower()
+    show = input(
+        "\nShow first 20 predictions (y/n): "
+    ).lower()
+
     if show == "y":
+
         for r in results:
-            print(f"\n{r['name']}")
-            print(r["predictions"][:20])
+
+            print(
+                f"\n{r['name']}"
+            )
+
+            print(
+                r["predictions"][:20]
+            )

@@ -1,6 +1,6 @@
 import pandas as pd
-from src.model.model_utils import get_num_feature_columns
-from src.analysis.analysis import pca_analysis, correlation_analysis, mutual_information_analysis, mrmr_analysis
+
+from analysis.analysis import get_num_feature_columns, pca_analysis, correlation_analysis, mutual_information_analysis, mrmr_analysis
 
 # These tests were created to test functions in analysis.py
 
@@ -34,7 +34,7 @@ def test_pca_analysis():
     
     features = get_num_feature_columns(df, "label")
 
-    result = pca_analysis(df, features, label="label", n_components=2)
+    result = pca_analysis(df=df, features=features, label="label", n_components=2)
 
     # Check contents of result
     assert "pca_df" in result
