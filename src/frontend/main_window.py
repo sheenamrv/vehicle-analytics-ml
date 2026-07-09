@@ -5,6 +5,8 @@ import pandas as pd
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QColor
 from PySide6.QtWidgets import (
     QComboBox,
+    QSpinBox,
+    QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -42,6 +44,11 @@ from src.analysis.analysis import (
     pca_analysis,
 )
 from src.data.process import load_project, save_project
+from src.model.model_registry import add_model, delete_model
+from src.model.model_training import test_models_current_data # removed train_model as it no longer exists
+from src.model.model_utils import validate_dataset, prepare_training_data
+from src.model.supervised_model import build_model
+from src.frontend.model_panel import ModelParameterPanel, MODEL_TYPES
 from src.data.test_load import get_available_columns, get_datasets, select_col, change_dtype
 from src.feature.feature import feature_extract
 from src.frontend.charts import ChartCanvas
@@ -252,7 +259,13 @@ CHART_TYPES = [
     "Box Plot",
     "Bar Chart",
     "Grouped Box Plot",
+    "Class Separation",
+    "3D Scatter",
+    "Time Series (All Signals)",
+    "Feature Distribution Comparison",
+    "Correlation Heatmap",
 ]
+
 
 # ============================================================================
 # Main Application Window
@@ -364,7 +377,9 @@ class AnalyticsWindow(QMainWindow):
             self.on_workflow_tab_changed,
             compact=True,
         )
-        content_layout.addLayout(self.workflow_tabs["layout"])
+        self.workflow_tabs_container = QWidget()
+        self.workflow_tabs_container.setLayout(self.workflow_tabs["layout"])
+        content_layout.addWidget(self.workflow_tabs_container)
 
         self.main_stack = QStackedWidget()
         content_layout.addWidget(self.main_stack, 1)
@@ -374,11 +389,13 @@ class AnalyticsWindow(QMainWindow):
         self._build_feature_page()
         self._build_analysis_page()
         self._build_visualization_page()
+        self._build_models_page()
 
         self.sidebar_stack.addWidget(self._import_sidebar())
         self.sidebar_stack.addWidget(self._feature_sidebar())
         self.sidebar_stack.addWidget(self._analysis_sidebar())
         self.sidebar_stack.addWidget(self._visualization_sidebar())
+        self.sidebar_stack.addWidget(self._models_sidebar())
 
         self.on_top_tab_changed(0)
         self.on_workflow_tab_changed(0)
@@ -506,10 +523,24 @@ class AnalyticsWindow(QMainWindow):
 
         self.chart_x_combo = taller_dropdown(QComboBox())
         self.chart_y_combo = taller_dropdown(QComboBox())
+        self.chart_z_combo = taller_dropdown(QComboBox())
         layout.addWidget(QLabel("X / Primary Column"))
         layout.addWidget(self.chart_x_combo)
         layout.addWidget(QLabel("Y Column"))
         layout.addWidget(self.chart_y_combo)
+        layout.addWidget(QLabel("Z Column (3D Scatter only)"))
+        layout.addWidget(self.chart_z_combo)
+
+        self.chart_bins_spin = QSpinBox()
+        self.chart_bins_spin.setRange(2, 200)
+        self.chart_bins_spin.setValue(24)
+        layout.addWidget(QLabel("Bins (Histogram only)"))
+        layout.addWidget(self.chart_bins_spin)
+
+        self.chart_multi_picker = ColumnPicker("Search columns")
+        self.chart_multi_picker.setMinimumHeight(100)
+        layout.addWidget(QLabel("Signals to Compare (Time Series / Distribution Comparison)"))
+        layout.addWidget(self.chart_multi_picker)
 
         render = primary_button("Render Chart")
         render.clicked.connect(self.render_visualization)
@@ -519,8 +550,76 @@ class AnalyticsWindow(QMainWindow):
         refresh = primary_button("Refresh Summary")
         refresh.clicked.connect(self.refresh_visualization_summary)
         layout.addWidget(refresh)
+
+        export_chart = secondary_button("Export Chart")
+        export_chart.clicked.connect(self.export_chart_gui)
+        layout.addWidget(export_chart)
+
         layout.addStretch()
         return panel
+
+    def _models_sidebar(self):
+        """Build training, selection, and testing controls for the Models tab."""
+        panel = sidebar_base()
+        layout = panel.layout()
+
+        layout.addWidget(section_label("TRAIN MODEL"))
+
+        self.model_type_combo = taller_dropdown(QComboBox())
+        self.model_type_combo.addItems([label for label, _ in MODEL_TYPES])
+        self.model_type_combo.currentIndexChanged.connect(self.update_model_parameter_fields)
+        layout.addWidget(QLabel("Model Type"))
+        layout.addWidget(self.model_type_combo)
+
+        self.model_param_panel = ModelParameterPanel()
+        layout.addWidget(self.model_param_panel)
+
+        self.model_test_size_spin = QDoubleSpinBox()
+        self.model_test_size_spin.setRange(0.05, 0.95)
+        self.model_test_size_spin.setSingleStep(0.05)
+        self.model_test_size_spin.setValue(0.3)
+        layout.addWidget(QLabel("Test Split"))
+        layout.addWidget(self.model_test_size_spin)
+
+        self.model_random_state_spin = QSpinBox()
+        self.model_random_state_spin.setRange(0, 9999)
+        self.model_random_state_spin.setValue(42)
+        layout.addWidget(QLabel("Random State"))
+        layout.addWidget(self.model_random_state_spin)
+
+        self.model_name_edit = QLineEdit()
+        self.model_name_edit.setPlaceholderText("Model display name")
+        layout.addWidget(QLabel("Model Name"))
+        layout.addWidget(self.model_name_edit)
+
+        train_button = primary_button("Train Model")
+        train_button.clicked.connect(self.train_new_model_gui)
+        layout.addWidget(train_button)
+        layout.addWidget(divider())
+
+        layout.addWidget(section_label("MANAGE MODELS"))
+
+        self.model_select_combo = taller_dropdown(QComboBox())
+        self.model_select_combo.currentTextChanged.connect(self.show_model_details_gui)
+        layout.addWidget(QLabel("Select Model"))
+        layout.addWidget(self.model_select_combo)
+
+        delete_button = secondary_button("Delete Selected Model")
+        delete_button.clicked.connect(self.delete_selected_model)
+        layout.addWidget(delete_button)
+
+        self.model_test_picker = ColumnPicker("Search models")
+        self.model_test_picker.setMinimumHeight(100)
+        layout.addWidget(QLabel("Models to Test"))
+        layout.addWidget(self.model_test_picker)
+
+        test_button = primary_button("Test Selected Models")
+        test_button.clicked.connect(self.test_selected_models_gui)
+        layout.addWidget(test_button)
+
+        layout.addStretch()
+        return panel
+
 
 # ============================================================================
 # Workflow Page Construction
@@ -781,20 +880,190 @@ class AnalyticsWindow(QMainWindow):
         layout.addWidget(self.visualization_table, 1)
         self.main_stack.addWidget(page)
 
+    def _build_models_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        self.models_title = section_label("SAVED MODELS")
+        self.models_model = PandasTableModel(pd.DataFrame())
+        self.models_table = table_view(self.models_model)
+        layout.addWidget(self.models_title)
+        layout.addWidget(self.models_table, 1)
+        self.main_stack.addWidget(page)
+
 # ============================================================================
 # Navigation & Tab Management
 # ============================================================================
 
     def on_top_tab_changed(self, index):
-        if index != 0:
+        if index == 0:
+            self.top_tabs["buttons"][0].setChecked(True)
+            self.workflow_tabs_container.setVisible(True)
+            current_workflow = 0
+            for i, button in enumerate(self.workflow_tabs["buttons"]):
+                if button.isChecked():
+                    current_workflow = i
+                    break
+            self.on_workflow_tab_changed(current_workflow)
+        elif index == 1:
+            self.top_tabs["buttons"][1].setChecked(True)
+            self.workflow_tabs_container.setVisible(False)
+            self.main_stack.setCurrentIndex(4)
+            self.sidebar_stack.setCurrentIndex(4)
+            self.refresh_models_list()
+        else:
             QMessageBox.information(
                 self,
                 "Coming Soon",
-                "This section is ready in the shell and will be connected as model and result workflows are added.",
+                "This section is ready in the shell and will be connected as result workflows are added.",
             )
             self.top_tabs["buttons"][0].setChecked(True)
+            self.workflow_tabs_container.setVisible(True)
+
+    # ============================================================================
+    # Models
+    # ============================================================================
+    def update_model_parameter_fields(self):
+        """Swap the visible parameter fields for the selected model type."""
+        _, model_type = MODEL_TYPES[self.model_type_combo.currentIndex()]
+        self.model_param_panel.set_model_type(model_type)
+
+    def refresh_models_list(self):
+        """Refresh the model dropdown/picker and the saved-models table."""
+        names = [m["display_name"] for m in self.project.get("models", [])] if self.project else []
+
+        self.model_select_combo.blockSignals(True)
+        self.model_select_combo.clear()
+        self.model_select_combo.addItems(names)
+        self.model_select_combo.blockSignals(False)
+
+        self.model_test_picker.blockSignals(True)
+        self.model_test_picker.set_items(names, checked=False)
+        self.model_test_picker.blockSignals(False)
+
+        self.show_model_details_gui()
+
+    def show_model_details_gui(self):
+        """Show details for the selected model, or a summary list if none selected."""
+        if not self.project or not self.project.get("models"):
+            self.models_title.setText("SAVED MODELS")
+            self.models_model.set_data(pd.DataFrame())
             return
-        self.top_tabs["buttons"][index].setChecked(True)
+
+        name = self.model_select_combo.currentText()
+        match = next((m for m in self.project["models"] if m["display_name"] == name), None)
+
+        if not match:
+            self.models_title.setText("SAVED MODELS")
+            rows = [(m["display_name"], m["algorithm"]) for m in self.project["models"]]
+            self.models_model.set_data(pd.DataFrame(rows, columns=["display_name", "algorithm"]))
+            return
+
+        self.models_title.setText(f"MODEL DETAILS - {match['display_name']}")
+        rows = [("algorithm", match["algorithm"])]
+        for key, value in match.get("parameters", {}).items():
+            rows.append((f"param: {key}", value))
+        for key, value in match.get("metrics", {}).items():
+            rows.append((f"metric: {key}", round(value, 4) if isinstance(value, float) else value))
+        self.models_model.set_data(pd.DataFrame(rows, columns=["field", "value"]))
+
+    def train_new_model_gui(self):
+        """Train a model using the sidebar's selections and add it to the project."""
+        if not self.project:
+            QMessageBox.warning(self, "No Project", "Create or load a project before training a model.")
+            return
+
+        df = self.working_df if not self.working_df.empty else self.og_df
+        label = self.project.get("label_column", self.label_combo.currentText())
+
+        valid, message = validate_dataset(df, label)
+        if not valid:
+            QMessageBox.warning(self, "Invalid Dataset", message)
+            return
+
+        try:
+            X, y = prepare_training_data(df, label)
+            feature_columns = X.columns.tolist()
+            _, model_type = MODEL_TYPES[self.model_type_combo.currentIndex()]
+            parameters = self.model_param_panel.get_parameters()
+            config = {
+                "test_size": self.model_test_size_spin.value(),
+                "random_state": self.model_random_state_spin.value(),
+            }
+            model = build_model(model_type, parameters)
+            trained_model, metrics = train_model(model, X, y, config) # use of old train_model function, please take a look at new files under model
+        except Exception as error:
+            self.show_error("Training Error", error)
+            return
+
+        display_name = self.model_name_edit.text().strip() or (
+            f"{model_type}_{len(self.project.get('models', [])) + 1}"
+        )
+
+        add_model(self.project, trained_model, display_name, model_type, {**config, **parameters}, metrics, feature_columns)
+        self._set_dirty(True)
+        self.model_name_edit.clear()
+        self.refresh_models_list()
+        QMessageBox.information(self, "Model Trained", f"'{display_name}' trained and added to the project.")
+
+    def delete_selected_model(self):
+        """Delete the model currently selected in the sidebar dropdown."""
+        if not self.project or not self.project.get("models"):
+            return
+
+        name = self.model_select_combo.currentText()
+        if not name:
+            return
+
+        result = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Delete model '{name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+
+        delete_model(self.project, name)
+        self._set_dirty(True)
+        self.refresh_models_list()
+
+    def test_selected_models_gui(self):
+        """Test the checked models from the picker against the working dataset."""
+        if not self.project or not self.project.get("models"):
+            QMessageBox.warning(self, "No Models", "Train or load at least one model first.")
+            return
+
+        names = self.model_test_picker.selected_items()
+        if not names:
+            QMessageBox.warning(self, "No Selection", "Select at least one model to test.")
+            return
+
+        df = self.working_df if not self.working_df.empty else self.og_df
+        label = self.project.get("label_column", self.label_combo.currentText())
+        models = [m for m in self.project["models"] if m["display_name"] in names]
+
+        try:
+            results = test_models_current_data(models, df, label)
+        except Exception as error:
+            self.show_error("Test Error", error)
+            return
+
+        rows = [
+            {
+                "model": r["name"],
+                "accuracy": round(r["accuracy"], 4),
+                "precision": round(r["precision"], 4),
+                "recall": round(r["recall"], 4),
+                "f1": round(r["f1"], 4),
+            }
+            for r in results
+        ]
+        self.models_title.setText("MODEL TEST RESULTS")
+        self.models_model.set_data(pd.DataFrame(rows))
 
     def on_workflow_tab_changed(self, index):
         """Switch the visible sidebar/page pair for the selected workflow tab."""
@@ -1846,7 +2115,7 @@ class AnalyticsWindow(QMainWindow):
 
     def populate_visualization_controls(self):
         """Populate chart column dropdowns from the active dataset columns."""
-        for combo in (self.chart_x_combo, self.chart_y_combo):
+        for combo in (self.chart_x_combo, self.chart_y_combo, self.chart_z_combo):
             combo.blockSignals(True)
             combo.clear()
             combo.addItems([str(col) for col in self.columns])
@@ -1858,23 +2127,37 @@ class AnalyticsWindow(QMainWindow):
             self.chart_y_combo.setCurrentText(
                 numeric_columns[1] if len(numeric_columns) > 1 else numeric_columns[0]
             )
+            self.chart_z_combo.setCurrentText(
+                numeric_columns[2] if len(numeric_columns) > 2 else numeric_columns[0]
+            )
+
+        self.chart_multi_picker.blockSignals(True)
+        self.chart_multi_picker.set_items(numeric_columns, checked=True)
+        self.chart_multi_picker.blockSignals(False)
+
         self.update_chart_controls()
 
     def update_chart_controls(self):
         """Enable only the chart inputs required by the selected chart type."""
         chart_type = self.chart_type_combo.currentText()
         # Extension point: keep this mapping aligned with CHART_TYPES.
-        needs_y = chart_type in ("Scatter", "Line", "Bar Chart", "Grouped Box Plot")
-        needs_x = chart_type in (
-            "Histogram",
-            "Scatter",
-            "Line",
-            "Box Plot",
-            "Bar Chart",
-            "Grouped Box Plot",
+        needs_y = chart_type in (
+            "Scatter", "Line", "Bar Chart", "Grouped Box Plot",
+            "Class Separation", "3D Scatter",
         )
+        needs_x = chart_type in (
+            "Histogram", "Scatter", "Line", "Box Plot", "Bar Chart",
+            "Grouped Box Plot", "Class Separation", "3D Scatter",
+        )
+        needs_z = chart_type == "3D Scatter"
+        needs_bins = chart_type == "Histogram"
+        needs_multi = chart_type in ("Time Series (All Signals)", "Feature Distribution Comparison")
+
         self.chart_x_combo.setEnabled(needs_x)
         self.chart_y_combo.setEnabled(needs_y)
+        self.chart_z_combo.setEnabled(needs_z)
+        self.chart_bins_spin.setEnabled(needs_bins)
+        self.chart_multi_picker.setEnabled(needs_multi)
 
     def render_visualization(self):
         """Render the selected generic visualization against the active dataset."""
@@ -1889,7 +2172,31 @@ class AnalyticsWindow(QMainWindow):
             self.chart_x_combo.currentText(),
             self.chart_y_combo.currentText(),
             self.label_combo.currentText(),
+            z_col=self.chart_z_combo.currentText(),
+            bins=self.chart_bins_spin.value(),
+            extra_cols=self.chart_multi_picker.selected_items(),
         )
+
+    def export_chart_gui(self):
+        """Save the currently rendered Visualization-tab chart to an image file."""
+        default_path = Path("ExportedModels") / "chart.png"
+        default_path.parent.mkdir(exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Chart",
+            str(default_path.resolve()),
+            "PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg)",
+        )
+        if not path:
+            return
+
+        try:
+            self.chart_canvas.figure.savefig(path, dpi=200, bbox_inches="tight")
+        except Exception as error:
+            self.show_error("Export Error", error)
+            return
+
+        QMessageBox.information(self, "Chart Exported", f"Saved {path}")
 
     def numeric_columns(self):
         """Return numeric columns from the active DataFrame for chart defaults."""
