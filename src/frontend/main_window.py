@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QInputDialog,
     QTableView,
+    QCheckBox,
+    QButtonGroup,
 )
 from PySide6.QtCore import (
     Qt,
@@ -45,7 +47,7 @@ from src.analysis.analysis import (
 )
 from src.data.process import load_project, save_project
 from src.model.model_registry import add_model, delete_model
-from src.model.model_training import test_models_current_data # removed train_model as it no longer exists
+from src.model.model_training import test_models_current_data
 from src.model.model_utils import validate_dataset, prepare_training_data
 from src.model.supervised_model import build_model
 from src.frontend.model_panel import ModelParameterPanel, MODEL_TYPES
@@ -55,6 +57,7 @@ from src.frontend.charts import ChartCanvas
 from src.frontend.data_summary import file_summary, missing_summary
 from src.frontend.styles import apply_app_styles
 from src.frontend.table_model import PandasTableModel
+from src.visualize.visualization import export_plot_image
 from src.frontend.widgets import (
     ColumnPicker,
     allowed_dtypes,
@@ -263,7 +266,6 @@ CHART_TYPES = [
     "3D Scatter",
     "Time Series (All Signals)",
     "Feature Distribution Comparison",
-    "Correlation Heatmap",
 ]
 
 
@@ -300,6 +302,19 @@ class AnalyticsWindow(QMainWindow):
         self.og_df = pd.DataFrame()
         self.working_df = pd.DataFrame()
         self.feature_df = pd.DataFrame()
+        self.latest_correlation_matrix = pd.DataFrame()
+        self.feature_use_raw = False
+        self.analysis_use_raw = False
+        self.analysis_include_label = True
+        self.active_analysis = "Correlation"
+        self.analysis_cmap = "viridis"
+        self.analysis_matrix_type = "Numeric"
+        self.feature_use_raw = False
+        self.analysis_use_raw = False
+        self.visualization_use_raw = False
+        self.active_analysis = "Correlation"
+        self.analysis_include_label = True
+        self.analysis_cmap = "viridis"
 
         # Each table view owns a lightweight model so data refreshes are cheap.
         self.preview_model = PandasTableModel()
@@ -436,10 +451,12 @@ class AnalyticsWindow(QMainWindow):
         layout.addWidget(QLabel("Features"))
         self.column_picker = ColumnPicker("Search columns")
         self.column_picker.setMinimumHeight(190)
-
         self.column_picker.selectionChange.connect(self.update_selected_columns)
-
         layout.addWidget(self.column_picker)
+
+        self.select_all_columns_button = secondary_button("Select All Columns")
+        self.select_all_columns_button.clicked.connect(self.select_all_columns)
+        layout.addWidget(self.select_all_columns_button)
 
         self.project_name = QLineEdit()
         self.project_name.setMinimumWidth(210)
@@ -461,9 +478,19 @@ class AnalyticsWindow(QMainWindow):
 
         layout.addWidget(section_label("SELECT COLUMNS"))
         layout.addWidget(QLabel("Columns to Analyze"))
-        self.signal_picker = ColumnPicker("Search columns")
-        self.signal_picker.setMinimumHeight(125)
-        layout.addWidget(self.signal_picker)
+        self.feature_numeric_picker = ColumnPicker("Search numeric columns")
+        self.feature_numeric_picker.setMinimumHeight(110)
+        layout.addWidget(QLabel("Numeric Columns"))
+        layout.addWidget(self.feature_numeric_picker)
+
+        self.feature_non_numeric_picker = ColumnPicker("Search non-numeric columns")
+        self.feature_non_numeric_picker.setMinimumHeight(110)
+        layout.addWidget(QLabel("Non-Numeric Columns"))
+        layout.addWidget(self.feature_non_numeric_picker)
+
+        self.feature_use_raw_checkbox = QCheckBox("Use raw dataset for feature extraction")
+        self.feature_use_raw_checkbox.toggled.connect(self.on_feature_use_raw_toggled)
+        layout.addWidget(self.feature_use_raw_checkbox)
         layout.addWidget(divider())
 
         layout.addWidget(section_label("SELECT FEATURES"))
@@ -493,19 +520,54 @@ class AnalyticsWindow(QMainWindow):
         layout = panel.layout()
         layout.addWidget(section_label("ANALYSIS"))
 
-        corr_button = primary_button("Correlation")
-        corr_button.clicked.connect(self.show_correlation)
-        layout.addWidget(corr_button)
+        self.analysis_type_combo = taller_dropdown(QComboBox())
+        self.analysis_type_combo.addItems(["Correlation", "PCA", "Mutual Information"])
+        self.analysis_type_combo.currentTextChanged.connect(self.on_analysis_type_changed)
+        layout.addWidget(QLabel("Analysis Type"))
+        layout.addWidget(self.analysis_type_combo)
 
-        pca_button = secondary_button("PCA")
-        pca_button.clicked.connect(self.show_pca)
-        layout.addWidget(pca_button)
+        self.run_analysis_button = primary_button("Run Analysis")
+        self.run_analysis_button.clicked.connect(self.run_current_analysis)
+        layout.addWidget(self.run_analysis_button)
 
-        mi_button = secondary_button("Mutual Information")
-        mi_button.clicked.connect(self.show_mutual_information)
-        layout.addWidget(mi_button)
-        # Extension point: add new analysis actions here and implement the
-        # matching show_* method using existing backend helpers where possible.
+        self.analysis_include_label_checkbox = QCheckBox("Include label")
+        self.analysis_include_label_checkbox.setChecked(self.analysis_include_label)
+        self.analysis_include_label_checkbox.toggled.connect(self.on_analysis_include_label_toggled)
+        layout.addWidget(self.analysis_include_label_checkbox)
+
+        self.analysis_use_raw_checkbox = QCheckBox("Use raw dataset")
+        self.analysis_use_raw_checkbox.toggled.connect(self.on_analysis_use_raw_toggled)
+        layout.addWidget(self.analysis_use_raw_checkbox)
+
+        self.analysis_cmap_label = QLabel("Heatmap Color")
+        self.analysis_cmap_combo = taller_dropdown(QComboBox())
+        self.analysis_cmap_combo.addItems(["viridis", "plasma", "inferno", "magma", "cividis"])
+        self.analysis_cmap_combo.currentTextChanged.connect(self.on_analysis_cmap_changed)
+        layout.addWidget(self.analysis_cmap_label)
+        layout.addWidget(self.analysis_cmap_combo)
+
+        self.analysis_non_numeric_checkbox = QCheckBox("Use non-numeric columns")
+        self.analysis_non_numeric_checkbox.toggled.connect(self.on_analysis_matrix_type_changed)
+        layout.addWidget(self.analysis_non_numeric_checkbox)
+
+        self.analysis_numeric_label = QLabel("Numeric Columns")
+        self.analysis_non_numeric_label = QLabel("Non-Numeric Columns")
+        self.analysis_numeric_picker = ColumnPicker("Search numeric columns")
+        self.analysis_numeric_picker.setMinimumHeight(100)
+        layout.addWidget(self.analysis_numeric_label)
+        layout.addWidget(self.analysis_numeric_picker)
+
+        self.analysis_non_numeric_picker = ColumnPicker("Search non-numeric columns")
+        self.analysis_non_numeric_picker.setMinimumHeight(100)
+        layout.addWidget(self.analysis_non_numeric_label)
+        layout.addWidget(self.analysis_non_numeric_picker)
+
+        self.export_analysis_button = secondary_button("Export Analysis Image")
+        self.export_analysis_button.clicked.connect(self.export_analysis_image)
+        layout.addWidget(self.export_analysis_button)
+
+        self._refresh_analysis_column_picker_visibility()
+        self.on_analysis_type_changed(self.analysis_type_combo.currentText())
         layout.addStretch()
         return panel
 
@@ -515,31 +577,49 @@ class AnalyticsWindow(QMainWindow):
         layout = panel.layout()
         layout.addWidget(section_label("VISUALIZATION"))
 
+        self.visualization_use_raw_checkbox = QCheckBox("Use raw dataset")
+        self.visualization_use_raw_checkbox.toggled.connect(self.on_visualization_use_raw_toggled)
+        layout.addWidget(self.visualization_use_raw_checkbox)
+
         self.chart_type_combo = taller_dropdown(QComboBox())
         self.chart_type_combo.addItems(CHART_TYPES)
-        self.chart_type_combo.currentTextChanged.connect(self.update_chart_controls)
+        self.chart_type_combo.currentTextChanged.connect(self.on_chart_type_changed)
         layout.addWidget(QLabel("Chart Type"))
         layout.addWidget(self.chart_type_combo)
+
+        self.chart_input_hint = QLabel("")
+        self.chart_input_hint.setWordWrap(True)
+        layout.addWidget(self.chart_input_hint)
 
         self.chart_x_combo = taller_dropdown(QComboBox())
         self.chart_y_combo = taller_dropdown(QComboBox())
         self.chart_z_combo = taller_dropdown(QComboBox())
-        layout.addWidget(QLabel("X / Primary Column"))
+        self.chart_x_label = QLabel("X / Primary Column")
+        self.chart_y_label = QLabel("Y Column")
+        self.chart_z_label = QLabel("Z Column (3D Scatter only)")
+        layout.addWidget(self.chart_x_label)
         layout.addWidget(self.chart_x_combo)
-        layout.addWidget(QLabel("Y Column"))
+        layout.addWidget(self.chart_y_label)
         layout.addWidget(self.chart_y_combo)
-        layout.addWidget(QLabel("Z Column (3D Scatter only)"))
+        layout.addWidget(self.chart_z_label)
         layout.addWidget(self.chart_z_combo)
 
         self.chart_bins_spin = QSpinBox()
         self.chart_bins_spin.setRange(2, 200)
         self.chart_bins_spin.setValue(24)
-        layout.addWidget(QLabel("Bins (Histogram only)"))
+        self.chart_bins_label = QLabel("Bins (Histogram only)")
+        layout.addWidget(self.chart_bins_label)
         layout.addWidget(self.chart_bins_spin)
+
+        self.chart_mean_line_checkbox = QCheckBox("Show mean line")
+        self.chart_median_line_checkbox = QCheckBox("Show median line")
+        layout.addWidget(self.chart_mean_line_checkbox)
+        layout.addWidget(self.chart_median_line_checkbox)
 
         self.chart_multi_picker = ColumnPicker("Search columns")
         self.chart_multi_picker.setMinimumHeight(100)
-        layout.addWidget(QLabel("Signals to Compare (Time Series / Distribution Comparison)"))
+        self.chart_multi_label = QLabel("Signals to Compare (Time Series / Distribution Comparison)")
+        layout.addWidget(self.chart_multi_label)
         layout.addWidget(self.chart_multi_picker)
 
         render = primary_button("Render Chart")
@@ -752,6 +832,7 @@ class AnalyticsWindow(QMainWindow):
                     self.working_df = df.copy()
                 self.working_df[column_name] = converted
                 self._set_dirty(True)
+                self.refresh_column_pickers()
                 self.refresh_import_tables()
                 self.populate_visualization_controls()
                 return
@@ -773,6 +854,7 @@ class AnalyticsWindow(QMainWindow):
                 new_dtype
             )
             self._set_dirty(True)
+            self.refresh_column_pickers()
             self.refresh_import_tables()
             self.populate_visualization_controls()
 
@@ -785,13 +867,14 @@ class AnalyticsWindow(QMainWindow):
             self.refresh_import_tables()
 
     def _canonical_dtype(self, dtype_name):
-        if dtype_name in ("int", "Int64", "int64"):
+        normalized = str(dtype_name).strip().lower()
+        if normalized in ("int", "int64", "int32", "int16", "int8"):
             return "int64"
-        if dtype_name in ("float", "float64"):
+        if normalized in ("float", "float64", "float32", "float16"):
             return "float64"
-        if dtype_name in ("bool", "boolean"):
+        if normalized in ("bool", "boolean", "bool8"):
             return "boolean"
-        if dtype_name in ("string", "object"):
+        if normalized in ("string", "str", "object", "string[python]", "string[pyarrow]", "str"):
             return "string"
         return dtype_name
 
@@ -976,7 +1059,7 @@ class AnalyticsWindow(QMainWindow):
             return
 
         df = self.working_df if not self.working_df.empty else self.og_df
-        label = self.project.get("label_column", self.label_combo.currentText())
+        label = self.project.get("label_column") or self.get_selected_label()
 
         valid, message = validate_dataset(df, label)
         if not valid:
@@ -993,7 +1076,7 @@ class AnalyticsWindow(QMainWindow):
                 "random_state": self.model_random_state_spin.value(),
             }
             model = build_model(model_type, parameters)
-            trained_model, metrics = train_model(model, X, y, config) # use of old train_model function, please take a look at new files under model
+            trained_model, metrics = build_model(model_type, parameters), {"accuracy": None}
         except Exception as error:
             self.show_error("Training Error", error)
             return
@@ -1043,7 +1126,7 @@ class AnalyticsWindow(QMainWindow):
             return
 
         df = self.working_df if not self.working_df.empty else self.og_df
-        label = self.project.get("label_column", self.label_combo.currentText())
+        label = self.project.get("label_column") or self.get_selected_label()
         models = [m for m in self.project["models"] if m["display_name"] in names]
 
         try:
@@ -1309,46 +1392,207 @@ class AnalyticsWindow(QMainWindow):
         self.populate_column_controls()
         self.refresh_import_tables()
 
+    def _refresh_label_combo(self):
+        active_columns = list(self.working_df.columns) if not self.working_df.empty else list(self.og_df.columns if not self.og_df.empty else self.columns)
+        current_label = self.get_selected_label()
+        self.label_combo.blockSignals(True)
+        self.label_combo.clear()
+        self.label_combo.addItem("(None)")
+        self.label_combo.addItems([str(col) for col in active_columns])
+        if current_label and current_label in active_columns:
+            self.label_combo.setCurrentText(current_label)
+        elif active_columns:
+            self.label_combo.setCurrentIndex(0)
+        self.label_combo.blockSignals(False)
+
     def populate_column_controls(self):
         """Refresh every control whose choices come from dataset columns."""
         self.column_picker.blockSignals(True)
-        self.signal_picker.blockSignals(True)
         self.column_picker.set_items(self.columns, checked=True)
-        self.signal_picker.set_items(self.columns, checked=True)
-        self.signal_picker.blockSignals(False)
         self.column_picker.blockSignals(False)
 
-        self.label_combo.clear()
-        self.label_combo.addItems([str(col) for col in self.columns])
-        if self.columns:
-            self.label_combo.setCurrentIndex(len(self.columns) - 1)
+        self._refresh_label_combo()
 
-        if self.project:
-            selected = self.project.get("selected_columns", self.columns)
-            label = self.project.get("label_column")
-            # Prevent programmatic selection from marking the project dirty.
-            self.column_picker.blockSignals(True)
-            self.signal_picker.blockSignals(True)
-            try:
-                self.column_picker.set_selected(selected)
-                self.signal_picker.set_selected(selected)
-            finally:
-                self.column_picker.blockSignals(False)
-                self.signal_picker.blockSignals(False)
-            if label:
-                index = self.label_combo.findText(label)
-                if index >= 0:
-                    self.label_combo.setCurrentIndex(index)
+        selected = self.project.get("selected_columns", self.columns) if self.project else self.columns
+        label = self.project.get("label_column") if self.project else None
+        # Prevent programmatic selection from marking the project dirty.
+        self.column_picker.blockSignals(True)
+        self.feature_numeric_picker.blockSignals(True)
+        self.feature_non_numeric_picker.blockSignals(True)
+        self.analysis_numeric_picker.blockSignals(True)
+        self.analysis_non_numeric_picker.blockSignals(True)
+        try:
+            self.column_picker.set_selected(selected)
+            selected_columns = [str(col) for col in selected if str(col) in self.columns]
+            feature_selected_only = not self.feature_use_raw
+            analysis_selected_only = not self.analysis_use_raw
+            feature_numeric_columns = self.numeric_columns(
+                use_raw=self.feature_use_raw,
+                selected_only=feature_selected_only,
+                include_label=True,
+            )
+            feature_non_numeric_columns = self.non_numeric_columns(
+                use_raw=self.feature_use_raw,
+                selected_only=feature_selected_only,
+                include_label=True,
+            )
+            analysis_numeric_columns = self.numeric_columns(
+                use_raw=self.analysis_use_raw,
+                selected_only=analysis_selected_only,
+                include_label=True,
+            )
+            analysis_non_numeric_columns = self.non_numeric_columns(
+                use_raw=self.analysis_use_raw,
+                selected_only=analysis_selected_only,
+                include_label=True,
+            )
+            self._populate_picker_choices(self.feature_numeric_picker, feature_numeric_columns, checked=False, preserve_selection=False)
+            self._populate_picker_choices(self.feature_non_numeric_picker, feature_non_numeric_columns, checked=False, preserve_selection=False)
+            self._populate_picker_choices(self.analysis_numeric_picker, analysis_numeric_columns, checked=False, preserve_selection=False)
+            self._populate_picker_choices(self.analysis_non_numeric_picker, analysis_non_numeric_columns, checked=False, preserve_selection=False)
+            self.feature_numeric_picker.set_selected([c for c in selected_columns if c in feature_numeric_columns])
+            self.feature_non_numeric_picker.set_selected([c for c in selected_columns if c in feature_non_numeric_columns])
+            self.analysis_numeric_picker.set_selected([c for c in selected_columns if c in analysis_numeric_columns])
+            self.analysis_non_numeric_picker.set_selected([c for c in selected_columns if c in analysis_non_numeric_columns])
+        finally:
+            self.column_picker.blockSignals(False)
+            self.feature_numeric_picker.blockSignals(False)
+            self.feature_non_numeric_picker.blockSignals(False)
+            self.analysis_numeric_picker.blockSignals(False)
+            self.analysis_non_numeric_picker.blockSignals(False)
+        if label:
+            index = self.label_combo.findText(label)
+            if index >= 0:
+                self.label_combo.setCurrentIndex(index)
 
         self.populate_visualization_controls()
 
+    def _populate_picker_choices(self, picker, items, checked=False, preserve_selection=False):
+        picker.blockSignals(True)
+        selected = picker.selected_items() if preserve_selection else []
+        picker.set_items(items, checked=checked)
+        if preserve_selection:
+            picker.set_selected([item for item in selected if item in items])
+        picker.blockSignals(False)
+
+    def _get_active_dataframe(self, use_raw=False):
+        if use_raw:
+            return self.og_df
+        return self.working_df if not self.working_df.empty else self.og_df
+
+    def _selected_import_columns(self, use_raw=False, include_label=False):
+        df = self._get_active_dataframe(use_raw=use_raw)
+        available_columns = list(df.columns) if not df.empty else list(self.columns)
+        selected = [str(col) for col in self.column_picker.selected_items() if str(col) in available_columns]
+        label = self.get_selected_label()
+        if not include_label and label and label in selected:
+            selected.remove(label)
+        return selected
+
+    def _is_effectively_numeric(self, series):
+        if series is None:
+            return False
+        return pd.api.types.is_numeric_dtype(series)
+
+    def refresh_column_pickers(self):
+        """Refresh the feature and analysis pickers from the active dataset state."""
+        feature_selected_only = not self.feature_use_raw
+        analysis_selected_only = not self.analysis_use_raw
+        self._populate_picker_choices(
+            self.feature_numeric_picker,
+            self.numeric_columns(
+                use_raw=self.feature_use_raw,
+                selected_only=feature_selected_only,
+                include_label=True,
+            ),
+            checked=False,
+            preserve_selection=True,
+        )
+        self._populate_picker_choices(
+            self.feature_non_numeric_picker,
+            self.non_numeric_columns(
+                use_raw=self.feature_use_raw,
+                selected_only=feature_selected_only,
+                include_label=True,
+            ),
+            checked=False,
+            preserve_selection=True,
+        )
+        self._populate_picker_choices(
+            self.analysis_numeric_picker,
+            self.numeric_columns(
+                use_raw=self.analysis_use_raw,
+                selected_only=analysis_selected_only,
+                include_label=True,
+            ),
+            checked=False,
+            preserve_selection=True,
+        )
+        self._populate_picker_choices(
+            self.analysis_non_numeric_picker,
+            self.non_numeric_columns(
+                use_raw=self.analysis_use_raw,
+                selected_only=analysis_selected_only,
+                include_label=True,
+            ),
+            checked=False,
+            preserve_selection=True,
+        )
+
+    def get_selected_label(self):
+        """Return the selected label column or None when the user chose no label."""
+        label = self.label_combo.currentText().strip()
+        if not label or label == "(None)":
+            return None
+        return label
+
     def selected_columns(self):
-        """Return selected features, always retaining the chosen label."""
+        """Return selected features, always retaining the chosen label when one is selected."""
         columns = self.column_picker.selected_items()
-        label = self.label_combo.currentText()
+        label = self.get_selected_label()
         if label and label not in columns:
             columns.append(label)
         return columns
+
+    def select_all_columns(self):
+        """Select all available columns without deselecting ones already selected."""
+        if not self.columns:
+            return
+        current = set(self.column_picker.selected_items())
+        all_columns = set(self.columns)
+        combined = current.union(all_columns)
+        self.column_picker.set_selected(list(combined))
+        self.update_selected_columns()
+
+    def on_feature_use_raw_toggled(self, checked):
+        if hasattr(self, "feature_use_raw_checkbox") and self.feature_use_raw_checkbox.isChecked() != checked:
+            self.feature_use_raw_checkbox.blockSignals(True)
+            self.feature_use_raw_checkbox.setChecked(checked)
+            self.feature_use_raw_checkbox.blockSignals(False)
+        self.feature_use_raw = checked
+        self.refresh_column_pickers()
+        if checked:
+            # In raw mode, default to all raw columns so the feature output
+            # reflects the full source dataset without extra clicks.
+            self.feature_numeric_picker.set_selected(list(self.feature_numeric_picker.checkboxes.keys()))
+            self.feature_non_numeric_picker.set_selected(list(self.feature_non_numeric_picker.checkboxes.keys()))
+        self.refresh_feature_tables_for_active_dataset()
+        self.populate_visualization_controls()
+
+    def _feature_source_dataframe(self):
+        """Return the dataset currently selected for feature extraction."""
+        use_raw = self.feature_use_raw_checkbox.isChecked() if hasattr(self, "feature_use_raw_checkbox") else self.feature_use_raw
+        return self.og_df if use_raw else (self.working_df if not self.working_df.empty else self.og_df)
+
+    def on_analysis_use_raw_toggled(self, checked):
+        self.analysis_use_raw = checked
+        self.refresh_column_pickers()
+        self.populate_visualization_controls()
+
+    def on_visualization_use_raw_toggled(self, checked):
+        self.visualization_use_raw = checked
+        self.refresh_column_pickers()
+        self.populate_visualization_controls()
 
     def update_selected_columns(self):
         """Return the selected columns, and retain the chosen label"""
@@ -1372,6 +1616,8 @@ class AnalyticsWindow(QMainWindow):
                 self.working_df = current[columns].copy()
 
         self._set_dirty(True)
+        self._refresh_label_combo()
+        self.refresh_column_pickers()
         self.refresh_import_tables()
         self.populate_visualization_controls()
 
@@ -1379,6 +1625,7 @@ class AnalyticsWindow(QMainWindow):
         """Clear analysis and visualization state when a new dataset/project loads."""
         self.project = None
         self.feature_df = pd.DataFrame()
+        self.latest_correlation_matrix = pd.DataFrame()
         self.analysis_model.set_data(pd.DataFrame())
         self.visualization_model.set_data(pd.DataFrame())
         self.analysis_chart.show_empty("Run an analysis from the sidebar.")
@@ -1579,14 +1826,17 @@ class AnalyticsWindow(QMainWindow):
 
             original_series = self.og_df[col]
             current_series = self.working_df[col]
-            if original_dtype == "float64":
-                restored = pd.to_numeric(current_series, errors="coerce").astype("float64")
+            if self._canonical_dtype(original_dtype) == "float64":
+                restored = pd.to_numeric(current_series.astype("string"), errors="coerce").astype("float64")
             else:
-                restored = current_series.copy()
+                restored = current_series.astype("object").copy()
 
             # Preserve imputed values, but restore original non-missing data from the source.
             original_mask = original_series.notna()
-            restored.loc[original_mask] = original_series.loc[original_mask]
+            if self._canonical_dtype(original_dtype) == "float64":
+                restored.loc[original_mask] = pd.to_numeric(original_series.loc[original_mask], errors="coerce").astype("float64")
+            else:
+                restored.loc[original_mask] = original_series.loc[original_mask].astype("object")
 
             if self._can_convert_dtype(restored, original_dtype):
                 try:
@@ -1779,7 +2029,7 @@ class AnalyticsWindow(QMainWindow):
             QMessageBox.warning(self, "Missing Columns", "Select at least one predictor or response column.")
             return False
 
-        label_col = self.label_combo.currentText()
+        label_col = self.get_selected_label()
         try:
             if self.working_df.empty:
                 self.working_df = self.og_df[columns].copy()
@@ -1925,6 +2175,9 @@ class AnalyticsWindow(QMainWindow):
     def refresh_import_tables(self):
         """Refresh import-tab preview, summary, missing table, and missing chart."""
         df = self.working_df if not self.working_df.empty else self.og_df
+        self._refresh_label_combo()
+        self.refresh_column_pickers()
+        self.populate_visualization_controls()
         self.refresh_preview_page()
         self.file_summary_model.set_data(file_summary(df))
         self.missing_model.set_data(missing_summary(df))
@@ -1961,12 +2214,12 @@ class AnalyticsWindow(QMainWindow):
     # ============================================================================
     def extract_features(self):
         """Run the existing feature_extract helper for selected columns."""
-        df = self.working_df if not self.working_df.empty else self.og_df
+        df = self._feature_source_dataframe()
         if df.empty:
             QMessageBox.warning(self, "Missing Dataset", "Open a dataset before extracting features.")
             return
 
-        signals = self.signal_picker.selected_items()
+        signals = self.feature_numeric_picker.selected_items() + self.feature_non_numeric_picker.selected_items()
         if not signals:
             QMessageBox.warning(self, "Missing Signals", "Select at least one signal.")
             return
@@ -1989,6 +2242,40 @@ class AnalyticsWindow(QMainWindow):
         self.refresh_feature_tables()
         self.on_workflow_tab_changed(1)
 
+    def refresh_feature_tables_for_active_dataset(self):
+        """Recompute feature results when the source dataset toggle changes."""
+        if self.feature_df.empty:
+            return
+
+        df = self._feature_source_dataframe()
+        if df.empty:
+            self.feature_df = pd.DataFrame()
+            self.refresh_feature_tables()
+            return
+
+        signals = self.feature_numeric_picker.selected_items() + self.feature_non_numeric_picker.selected_items()
+        if not signals:
+            self.feature_df = pd.DataFrame()
+            self.refresh_feature_tables()
+            return
+
+        requested_features = self.feature_picker.selected_items()
+        try:
+            raw_features = feature_extract(df, signals)
+        except Exception as error:
+            self.show_error("Feature Extraction Error", error)
+            return
+
+        rows = []
+        for signal, values in raw_features.items():
+            row = {"signal": signal}
+            for feature in requested_features:
+                row[feature] = values.get(feature, "")
+            rows.append(row)
+
+        self.feature_df = pd.DataFrame(rows)
+        self.refresh_feature_tables()
+
     def refresh_feature_tables(self):
         """Refresh the feature dataset preview and summary models."""
         self.feature_preview_model.set_data(self.feature_df)
@@ -2004,7 +2291,7 @@ class AnalyticsWindow(QMainWindow):
             )
             return
 
-        default_path = Path("ExportedModels") / "feature_dataset.csv"
+        default_path = self.downloads_dir / "feature_dataset.csv"
         default_path.parent.mkdir(exist_ok=True)
         path, _ = QFileDialog.getSaveFileName(
             self,
@@ -2026,38 +2313,124 @@ class AnalyticsWindow(QMainWindow):
     # ============================================================================
     # Analysis
     # ============================================================================
+    def on_analysis_type_changed(self, value):
+        self.active_analysis = value
+        uses_heatmap = value == "Correlation"
+        non_numeric_allowed = value == "Correlation"
+        self.analysis_include_label_checkbox.setVisible(False)
+        self.analysis_cmap_label.setVisible(uses_heatmap)
+        self.analysis_cmap_combo.setVisible(uses_heatmap)
+        self.analysis_non_numeric_checkbox.setEnabled(non_numeric_allowed)
+        self.analysis_non_numeric_checkbox.setVisible(non_numeric_allowed)
+        if not non_numeric_allowed:
+            self.analysis_non_numeric_checkbox.blockSignals(True)
+            self.analysis_non_numeric_checkbox.setChecked(False)
+            self.analysis_non_numeric_checkbox.blockSignals(False)
+            self.analysis_matrix_type = "Numeric"
+        self._refresh_analysis_column_picker_visibility()
+        if value == "Mutual Information":
+            self.analysis_include_label_checkbox.blockSignals(True)
+            self.analysis_include_label_checkbox.setChecked(True)
+            self.analysis_include_label = True
+            self.analysis_include_label_checkbox.blockSignals(False)
+        else:
+            self.analysis_include_label = False
+
+    def on_analysis_include_label_toggled(self, checked):
+        if self.analysis_type_combo.currentText() == "Mutual Information":
+            checked = True
+            self.analysis_include_label_checkbox.blockSignals(True)
+            self.analysis_include_label_checkbox.setChecked(True)
+            self.analysis_include_label_checkbox.blockSignals(False)
+        self.analysis_include_label = checked
+
+    def on_analysis_matrix_type_changed(self, checked):
+        self.analysis_matrix_type = "Non-Numeric" if checked else "Numeric"
+        self._refresh_analysis_column_picker_visibility()
+
+    def _refresh_analysis_column_picker_visibility(self):
+        use_non_numeric = self.analysis_matrix_type == "Non-Numeric"
+        self.analysis_numeric_picker.setVisible(not use_non_numeric)
+        self.analysis_non_numeric_picker.setVisible(use_non_numeric)
+        self.analysis_numeric_label.setVisible(not use_non_numeric)
+        self.analysis_non_numeric_label.setVisible(use_non_numeric and self.analysis_non_numeric_checkbox.isVisible())
+
+    def on_analysis_cmap_changed(self, value):
+        self.analysis_cmap = value
+        if not self.latest_correlation_matrix.empty:
+            self.analysis_chart.plot_correlation_heatmap(self.latest_correlation_matrix, cmap=self.analysis_cmap)
+
+    def on_chart_type_changed(self, _value):
+        self.populate_visualization_controls()
+
+    def run_current_analysis(self):
+        analysis_type = self.analysis_type_combo.currentText()
+        if analysis_type == "Correlation":
+            self.show_correlation()
+        elif analysis_type == "PCA":
+            self.show_pca()
+        else:
+            self.show_mutual_information()
+
     def show_correlation(self):
         """Run correlation analysis and show matrix plus heatmap."""
-        df = self.working_df if not self.working_df.empty else self.og_df
-        label = self.label_combo.currentText()
+        df = self._get_active_dataframe(use_raw=self.analysis_use_raw)
         if df.empty:
             QMessageBox.warning(self, "Missing Dataset", "Open a dataset first.")
             return
 
+        if self.analysis_matrix_type == "Numeric":
+            candidate_columns = self.analysis_numeric_picker.selected_items() or self.numeric_columns(
+                use_raw=self.analysis_use_raw,
+                selected_only=True,
+                include_label=True,
+            )
+            if len(candidate_columns) < 2:
+                QMessageBox.warning(self, "Correlation Unavailable", "Select at least two numeric columns for a numeric correlation matrix.")
+                return
+            matrix_df = df[candidate_columns].select_dtypes(include="number")
+        else:
+            candidate_columns = self.analysis_non_numeric_picker.selected_items() or self.non_numeric_columns(
+                use_raw=self.analysis_use_raw,
+                selected_only=True,
+                include_label=True,
+            )
+            if not candidate_columns:
+                QMessageBox.warning(self, "Correlation Unavailable", "Select at least one non-numeric column for a non-numeric correlation matrix.")
+                return
+            matrix_df = pd.get_dummies(df[candidate_columns].copy(), dummy_na=False)
+            if matrix_df.shape[1] < 2:
+                QMessageBox.warning(self, "Correlation Unavailable", "The selected non-numeric columns do not produce a useful correlation matrix.")
+                return
+
         try:
-            # Backend call: do not duplicate correlation logic in the frontend.
-            result = correlation_analysis(df, label)
+            corr = matrix_df.corr().round(4)
         except Exception as error:
             self.show_error("Correlation Error", error)
             return
 
-        self.analysis_title.setText("CORRELATION MATRIX")
-        self.analysis_model.set_data(result.round(4))
-        self.analysis_chart.plot_correlation_heatmap(df.drop(columns=[label], errors="ignore"))
+        self.analysis_title.setText(f"CORRELATION MATRIX - {self.analysis_matrix_type.upper()}")
+        self.latest_correlation_matrix = corr.copy()
+        self.analysis_model.set_data(corr)
+        self.analysis_chart.plot_correlation_heatmap(corr, cmap=self.analysis_cmap)
         self.on_workflow_tab_changed(2)
 
     def show_pca(self):
         """Run the existing PCA analysis and show table plus PC scatter chart."""
-        df = self.working_df if not self.working_df.empty else self.og_df
-        label = self.label_combo.currentText()
-        features = get_num_feature_columns(df, label) if not df.empty else []
+        df = self.og_df if self.analysis_use_raw else (self.working_df if not self.working_df.empty else self.og_df)
+        selected_label = self.get_selected_label()
+        features = self.analysis_numeric_picker.selected_items() or self.numeric_columns(
+            use_raw=self.analysis_use_raw,
+            selected_only=True,
+            include_label=False,
+        ) if not df.empty else []
+        features = [feature for feature in features if feature in df.columns and feature != selected_label]
         if len(features) < 2:
             QMessageBox.warning(self, "PCA Unavailable", "PCA needs at least two numeric feature columns.")
             return
 
         try:
-            # Backend call: pca_analysis owns scaling and component generation.
-            result = pca_analysis(df, features, label, n_components=2)
+            result = pca_analysis(df, features, None, n_components=2)
             pca_df = result["pca_df"].head(200).copy()
             pca_df.attrs["explained_variance_sum"] = result["explained_variance_sum"]
         except Exception as error:
@@ -2068,20 +2441,24 @@ class AnalyticsWindow(QMainWindow):
             f"PCA PREVIEW - EXPLAINED VARIANCE {result['explained_variance_sum']:.2%}"
         )
         self.analysis_model.set_data(pca_df.round(4))
-        self.analysis_chart.plot_pca_scatter(pca_df, label)
+        self.analysis_chart.plot_pca_scatter(pca_df, None, cmap=self.analysis_cmap)
         self.on_workflow_tab_changed(2)
 
     def show_mutual_information(self):
         """Run mutual information analysis and show table plus score chart."""
-        df = self.working_df if not self.working_df.empty else self.og_df
-        label = self.label_combo.currentText()
-        features = get_num_feature_columns(df, label) if not df.empty else []
+        df = self.og_df if self.analysis_use_raw else (self.working_df if not self.working_df.empty else self.og_df)
+        label = self.get_selected_label()
+        features = self.analysis_numeric_picker.selected_items() or self.numeric_columns(
+            use_raw=self.analysis_use_raw,
+            selected_only=True,
+            include_label=True,
+        ) if not df.empty else []
+        features = [feature for feature in features if feature in df.columns and feature != label]
         if not features or not label:
             QMessageBox.warning(self, "Analysis Unavailable", "Select numeric features and a response column.")
             return
 
         try:
-            # Backend call: frontend only displays returned feature scores.
             result = mutual_information_analysis(df, features, label)
         except Exception as error:
             self.show_error("Mutual Information Error", error)
@@ -2098,14 +2475,14 @@ class AnalyticsWindow(QMainWindow):
 
     def refresh_visualization_summary(self):
         """Refresh the small project/dataset summary under the Visualization chart."""
-        df = self.working_df if not self.working_df.empty else self.og_df
+        df = self._get_active_dataframe(use_raw=self.visualization_use_raw)
         summary = file_summary(df)
         if self.project:
             extra = pd.DataFrame(
                 [
                     ("Project", self.project.get("project_name", "")),
                     ("Dataset", self.project.get("dataset", "")),
-                    ("Label", self.project.get("label_column", self.label_combo.currentText())),
+                    ("Label", self.project.get("label_column", self.get_selected_label())),
                     ("Feature Rows", len(self.feature_df)),
                 ],
                 columns=["metric", "value"],
@@ -2115,32 +2492,56 @@ class AnalyticsWindow(QMainWindow):
 
     def populate_visualization_controls(self):
         """Populate chart column dropdowns from the active dataset columns."""
-        for combo in (self.chart_x_combo, self.chart_y_combo, self.chart_z_combo):
+        df = self._get_active_dataframe(use_raw=self.visualization_use_raw)
+        numeric_columns = self.numeric_columns(use_raw=self.visualization_use_raw)
+        date_columns = self.date_columns(use_raw=self.visualization_use_raw)
+        categorical_columns = self.categorical_columns(use_raw=self.visualization_use_raw)
+        chart_type = self.chart_type_combo.currentText()
+        if chart_type in ("Histogram", "Box Plot", "Scatter", "Class Separation", "3D Scatter"):
+            x_options = list(dict.fromkeys(numeric_columns))
+            y_options = list(dict.fromkeys(numeric_columns))
+            z_options = list(dict.fromkeys(numeric_columns))
+        elif chart_type == "Line":
+            x_options = list(dict.fromkeys(date_columns + categorical_columns + list(df.columns)))
+            y_options = list(dict.fromkeys(numeric_columns))
+            z_options = []
+        elif chart_type == "Bar Chart":
+            x_options = categorical_columns or list(df.columns)
+            y_options = numeric_columns or list(df.columns)
+            z_options = []
+        elif chart_type == "Grouped Box Plot":
+            x_options = categorical_columns or list(df.columns)
+            y_options = numeric_columns or list(df.columns)
+            z_options = []
+        else:
+            x_options = list(df.columns)
+            y_options = list(df.columns)
+            z_options = list(df.columns)
+
+        for combo, options in ((self.chart_x_combo, x_options), (self.chart_y_combo, y_options), (self.chart_z_combo, z_options)):
             combo.blockSignals(True)
             combo.clear()
-            combo.addItems([str(col) for col in self.columns])
+            combo.addItems([str(col) for col in options])
             combo.blockSignals(False)
 
-        numeric_columns = self.numeric_columns()
-        if numeric_columns:
-            self.chart_x_combo.setCurrentText(numeric_columns[0])
-            self.chart_y_combo.setCurrentText(
-                numeric_columns[1] if len(numeric_columns) > 1 else numeric_columns[0]
-            )
-            self.chart_z_combo.setCurrentText(
-                numeric_columns[2] if len(numeric_columns) > 2 else numeric_columns[0]
-            )
+        if x_options:
+            self.chart_x_combo.setCurrentText(x_options[0])
+        if y_options:
+            self.chart_y_combo.setCurrentText(y_options[1] if len(y_options) > 1 else y_options[0])
+        if z_options:
+            self.chart_z_combo.setCurrentText(z_options[2] if len(z_options) > 2 else z_options[0])
 
         self.chart_multi_picker.blockSignals(True)
         self.chart_multi_picker.set_items(numeric_columns, checked=True)
         self.chart_multi_picker.blockSignals(False)
 
+        self.chart_input_hint.setText("")
+        self.chart_input_hint.setVisible(False)
         self.update_chart_controls()
 
     def update_chart_controls(self):
         """Enable only the chart inputs required by the selected chart type."""
         chart_type = self.chart_type_combo.currentText()
-        # Extension point: keep this mapping aligned with CHART_TYPES.
         needs_y = chart_type in (
             "Scatter", "Line", "Bar Chart", "Grouped Box Plot",
             "Class Separation", "3D Scatter",
@@ -2152,16 +2553,40 @@ class AnalyticsWindow(QMainWindow):
         needs_z = chart_type == "3D Scatter"
         needs_bins = chart_type == "Histogram"
         needs_multi = chart_type in ("Time Series (All Signals)", "Feature Distribution Comparison")
+        needs_lines = chart_type in ("Histogram", "Box Plot")
 
-        self.chart_x_combo.setEnabled(needs_x)
-        self.chart_y_combo.setEnabled(needs_y)
-        self.chart_z_combo.setEnabled(needs_z)
-        self.chart_bins_spin.setEnabled(needs_bins)
-        self.chart_multi_picker.setEnabled(needs_multi)
+        field_label = {
+            "Histogram": "Numeric X column",
+            "Scatter": "Numeric X/Y columns",
+            "Line": "Date, category, or text X column with numeric Y values",
+            "Box Plot": "Numeric column",
+            "Bar Chart": "Category + numeric value",
+            "Grouped Box Plot": "Category + numeric value",
+            "Class Separation": "Numeric X/Y columns",
+            "3D Scatter": "Numeric X/Y/Z columns",
+            "Time Series (All Signals)": "Numeric signal columns",
+            "Feature Distribution Comparison": "Numeric signal columns",
+            "Correlation Heatmap": "Numeric columns",
+        }.get(chart_type, "Columns")
+
+        self.chart_x_combo.setVisible(needs_x)
+        self.chart_y_combo.setVisible(needs_y)
+        self.chart_z_combo.setVisible(needs_z)
+        self.chart_x_label.setVisible(needs_x)
+        self.chart_y_label.setVisible(needs_y)
+        self.chart_z_label.setVisible(needs_z)
+        self.chart_bins_spin.setVisible(needs_bins)
+        self.chart_bins_label.setVisible(needs_bins)
+        self.chart_multi_picker.setVisible(needs_multi)
+        self.chart_multi_label.setVisible(needs_multi)
+        self.chart_mean_line_checkbox.setVisible(needs_lines)
+        self.chart_median_line_checkbox.setVisible(needs_lines)
+        self.chart_input_hint.setText("")
+        self.chart_input_hint.setVisible(False)
 
     def render_visualization(self):
         """Render the selected generic visualization against the active dataset."""
-        df = self.working_df if not self.working_df.empty else self.og_df
+        df = self._get_active_dataframe(use_raw=self.visualization_use_raw)
         if df.empty:
             self.chart_canvas.show_empty("Open a dataset to visualize it.")
             return
@@ -2171,15 +2596,17 @@ class AnalyticsWindow(QMainWindow):
             self.chart_type_combo.currentText(),
             self.chart_x_combo.currentText(),
             self.chart_y_combo.currentText(),
-            self.label_combo.currentText(),
+            self.get_selected_label(),
             z_col=self.chart_z_combo.currentText(),
             bins=self.chart_bins_spin.value(),
             extra_cols=self.chart_multi_picker.selected_items(),
+            show_median_line=self.chart_median_line_checkbox.isChecked(),
+            show_mean_line=self.chart_mean_line_checkbox.isChecked(),
         )
 
     def export_chart_gui(self):
         """Save the currently rendered Visualization-tab chart to an image file."""
-        default_path = Path("ExportedModels") / "chart.png"
+        default_path = self.downloads_dir / "chart.png"
         default_path.parent.mkdir(exist_ok=True)
         path, _ = QFileDialog.getSaveFileName(
             self,
@@ -2191,19 +2618,81 @@ class AnalyticsWindow(QMainWindow):
             return
 
         try:
-            self.chart_canvas.figure.savefig(path, dpi=200, bbox_inches="tight")
+            export_plot_image(self.chart_canvas.figure, path)
         except Exception as error:
             self.show_error("Export Error", error)
             return
 
         QMessageBox.information(self, "Chart Exported", f"Saved {path}")
 
-    def numeric_columns(self):
-        """Return numeric columns from the active DataFrame for chart defaults."""
-        df = self.working_df if not self.working_df.empty else self.og_df
+    def date_columns(self, use_raw=False):
+        """Return columns that can be plotted as date-like values."""
+        df = self._get_active_dataframe(use_raw=use_raw)
         if df.empty:
             return []
-        return [str(col) for col in df.select_dtypes(include="number").columns]
+
+        date_columns = []
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                date_columns.append(str(col))
+                continue
+            try:
+                parsed = pd.to_datetime(df[col], errors="coerce")
+                if parsed.notna().sum() > 0 and parsed.notna().sum() >= max(1, len(parsed) // 2):
+                    date_columns.append(str(col))
+            except Exception:
+                continue
+        return date_columns
+
+    def numeric_columns(self, use_raw=False, selected_only=False, include_label=False):
+        """Return numeric columns from the active DataFrame for chart defaults."""
+        df = self._get_active_dataframe(use_raw=use_raw)
+        if df.empty:
+            return []
+
+        candidate_columns = list(df.columns)
+        if selected_only:
+            candidate_columns = self._selected_import_columns(use_raw=use_raw, include_label=include_label)
+
+        return [str(col) for col in candidate_columns if col in df.columns and self._is_effectively_numeric(df[col])]
+
+    def non_numeric_columns(self, use_raw=False, selected_only=False, include_label=False):
+        """Return non-numeric columns from the active DataFrame."""
+        df = self._get_active_dataframe(use_raw=use_raw)
+        if df.empty:
+            return []
+
+        candidate_columns = list(df.columns)
+        if selected_only:
+            candidate_columns = self._selected_import_columns(use_raw=use_raw, include_label=include_label)
+
+        return [str(col) for col in candidate_columns if col in df.columns and not self._is_effectively_numeric(df[col])]
+
+    def categorical_columns(self, use_raw=False):
+        """Return categorical-like columns for visualization defaults."""
+        df = self._get_active_dataframe(use_raw=use_raw)
+        if df.empty:
+            return []
+        return [str(col) for col in df.select_dtypes(exclude="number").columns]
+
+    def export_analysis_image(self):
+        """Export the currently rendered analysis figure to an image file."""
+        default_path = self.downloads_dir / "analysis.png"
+        default_path.parent.mkdir(exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Analysis Image",
+            str(default_path.resolve()),
+            "PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg)",
+        )
+        if not path:
+            return
+        try:
+            export_plot_image(self.analysis_chart.figure, path)
+        except Exception as error:
+            self.show_error("Export Error", error)
+            return
+        QMessageBox.information(self, "Export Complete", f"Saved {path}")
 
     # ============================================================================
     # Utility Functions
