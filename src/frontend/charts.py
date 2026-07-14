@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3D projection)
 
 '''
     Central location for every chart rendered by the application
@@ -48,7 +49,8 @@ class ChartCanvas(FigureCanvasQTAgg):
         axis.set_axis_off()
         self.draw()
 
-    def plot(self, df, chart_type, x_col=None, y_col=None, label_col=None):
+    def plot(self, df, chart_type, x_col=None, y_col=None, label_col=None,
+             z_col=None, bins=24, extra_cols=None):
         """Route Visualization-tab chart selections to plotting methods."""
         if df.empty:
             self.show_empty("Open a dataset to visualize it.")
@@ -56,7 +58,7 @@ class ChartCanvas(FigureCanvasQTAgg):
 
         # Extension point: add new generic chart types to this dispatch.
         if chart_type == "Histogram":
-            self._histogram(df, x_col)
+            self._histogram(df, x_col, bins=bins)
         elif chart_type == "Scatter":
             self._scatter(df, x_col, y_col, label_col)
         elif chart_type == "Line":
@@ -67,6 +69,16 @@ class ChartCanvas(FigureCanvasQTAgg):
             self._bar_chart(df, x_col, y_col)
         elif chart_type == "Grouped Box Plot":
             self._grouped_box_plot(df, x_col, y_col)
+        elif chart_type == "Class Separation":
+            self._class_separation(df, x_col, y_col, label_col)
+        elif chart_type == "3D Scatter":
+            self._scatter_3d(df, x_col, y_col, z_col, label_col)
+        elif chart_type == "Time Series (All Signals)":
+            self._time_series(df, extra_cols)
+        elif chart_type == "Feature Distribution Comparison":
+            self._distribution_comparison(df, extra_cols)
+        elif chart_type == "Correlation Heatmap":
+            self._correlation_heatmap(df)
         else:
             self.show_empty("Choose a chart type.")
 
@@ -138,23 +150,27 @@ class ChartCanvas(FigureCanvasQTAgg):
         axis.set_xlabel("Score")
         axis.set_ylabel("Feature")
         self._style_axis(axis)
-        self.draw()
 
-    def _single_axis(self):
+    def _single_axis(self, projection=None):
         """Reset the figure and return a fresh axis for single-chart canvases."""
         self.figure.clear()
+        if projection:
+            return self.figure.add_subplot(111, projection=projection)
         return self.figure.add_subplot(111)
 
-    def _histogram(self, df, column):
+    def _histogram(self, df, column, bins=24):
         axis = self._single_axis()
         series = self._numeric_series(df, column)
         if series is None:
             self.show_empty("Choose a numeric column for the histogram.")
             return
 
-        axis.hist(series.dropna(), bins=24, color="#36b66b", edgecolor="white")
+        bins = int(bins) if bins else 24
+        bins = max(2, min(bins, 200))
+
+        axis.hist(series.dropna(), bins=bins, color="#36b66b", edgecolor="white")
         axis.axvline(series.mean(), color="#1f7f43", linestyle="--", linewidth=2)
-        axis.set_title(f"Histogram: {column}")
+        axis.set_title(f"Histogram: {column} ({bins} bins)")
         axis.set_xlabel(column)
         axis.set_ylabel("Count")
         self._style_axis(axis)
@@ -194,6 +210,135 @@ class ChartCanvas(FigureCanvasQTAgg):
         axis.set_title(f"{y_col} vs {x_col}")
         axis.set_xlabel(x_col)
         axis.set_ylabel(y_col)
+        self._style_axis(axis)
+
+    def _class_separation(self, df, x_col, y_col, label_col):
+        """Scatter plot that requires a label column, colored per class."""
+        axis = self._single_axis()
+        if not self._has_columns(df, [x_col, y_col]):
+            self.show_empty("Choose X and Y columns for class separation.")
+            return
+        if not label_col or label_col not in df.columns:
+            self.show_empty("Choose a label column to separate classes.")
+            return
+
+        plot_df = df[[x_col, y_col, label_col]].dropna()
+        if plot_df.empty:
+            self.show_empty("The selected columns do not contain plottable values.")
+            return
+
+        labels = plot_df[label_col].astype("category")
+        if labels.cat.categories.size > 20:
+            self.show_empty("Too many distinct classes to color legibly (limit 20).")
+            return
+
+        scatter = axis.scatter(
+            plot_df[x_col],
+            plot_df[y_col],
+            c=labels.cat.codes,
+            cmap="tab20" if labels.cat.categories.size > 10 else "viridis",
+            alpha=0.8,
+            s=38,
+        )
+        handles, _ = scatter.legend_elements()
+        axis.legend(
+            handles,
+            labels.cat.categories.astype(str),
+            title=label_col,
+            loc="best",
+            frameon=False,
+        )
+        axis.set_title(f"Class Separation: {y_col} vs {x_col} by {label_col}")
+        axis.set_xlabel(x_col)
+        axis.set_ylabel(y_col)
+        self._style_axis(axis)
+
+    def _scatter_3d(self, df, x_col, y_col, z_col, label_col=None):
+        if not self._has_columns(df, [x_col, y_col, z_col]):
+            self.show_empty("Choose X, Y, and Z columns for the 3D scatter plot.")
+            return
+
+        columns = [x_col, y_col, z_col] + ([label_col] if label_col in df.columns else [])
+        plot_df = df[columns].dropna()
+        if plot_df.empty:
+            self.show_empty("The selected columns do not contain plottable values.")
+            return
+
+        axis = self._single_axis(projection="3d")
+
+        if label_col in plot_df.columns and plot_df[label_col].nunique() <= 12:
+            labels = plot_df[label_col].astype("category")
+            scatter = axis.scatter(
+                plot_df[x_col],
+                plot_df[y_col],
+                plot_df[z_col],
+                c=labels.cat.codes,
+                cmap="viridis",
+                alpha=0.8,
+                s=30,
+            )
+            handles, _ = scatter.legend_elements()
+            axis.legend(handles, labels.cat.categories.astype(str), title=label_col, loc="best")
+        else:
+            axis.scatter(plot_df[x_col], plot_df[y_col], plot_df[z_col], color="#36b66b", alpha=0.8, s=30)
+
+        axis.set_title(f"3D Scatter: {x_col}, {y_col}, {z_col}")
+        axis.set_xlabel(x_col)
+        axis.set_ylabel(y_col)
+        axis.set_zlabel(z_col)
+
+    def _time_series(self, df, columns=None):
+        """Plot all (or selected) numeric signals against the row index."""
+        numeric_df = df.select_dtypes(include="number")
+        if columns:
+            keep = [c for c in columns if c in numeric_df.columns]
+            if keep:
+                numeric_df = numeric_df[keep]
+
+        if numeric_df.empty:
+            self.show_empty("No numeric signals available for a time series plot.")
+            return
+
+        # Cap both series count and row count so the plot stays legible/responsive.
+        numeric_df = numeric_df.iloc[:2000, :12]
+
+        axis = self._single_axis()
+        for column in numeric_df.columns:
+            axis.plot(numeric_df.index, numeric_df[column], linewidth=1.4, label=str(column))
+
+        axis.set_title("Time Series - All Signals")
+        axis.set_xlabel("Row Index")
+        axis.set_ylabel("Value")
+        if numeric_df.shape[1] <= 12:
+            axis.legend(loc="best", fontsize=8, frameon=False, ncol=2)
+        self._style_axis(axis)
+
+    def _distribution_comparison(self, df, columns=None):
+        """Overlay histograms for multiple numeric columns to compare shape/spread."""
+        numeric_df = df.select_dtypes(include="number")
+        if columns:
+            keep = [c for c in columns if c in numeric_df.columns]
+            if keep:
+                numeric_df = numeric_df[keep]
+
+        if numeric_df.empty:
+            self.show_empty("No numeric columns available to compare.")
+            return
+
+        numeric_df = numeric_df.iloc[:, :8]  # keep legend readable
+        axis = self._single_axis()
+        colors = plt_colormap(numeric_df.shape[1])
+
+        for color, column in zip(colors, numeric_df.columns):
+            series = numeric_df[column].replace([np.inf, -np.inf], np.nan).dropna()
+            if series.empty:
+                continue
+            axis.hist(series, bins=30, alpha=0.45, label=str(column), color=color, density=True)
+
+        axis.set_title("Feature Distribution Comparison")
+        axis.set_xlabel("Value")
+        axis.set_ylabel("Density")
+        axis.legend(loc="best", fontsize=8, frameon=False)
         self._style_axis(axis)
 
     def _line(self, df, x_col, y_col):
@@ -344,3 +489,10 @@ class ChartCanvas(FigureCanvasQTAgg):
         axis.grid(True, color="#e5e7eb", linewidth=0.8)
         axis.spines["top"].set_visible(False)
         axis.spines["right"].set_visible(False)
+
+
+def plt_colormap(n):
+    """Return n visually distinct colors for overlay-style charts."""
+    import matplotlib.cm as cm
+    cmap = cm.get_cmap("tab10" if n <= 10 else "tab20")
+    return [cmap(i / max(n - 1, 1)) for i in range(n)]
