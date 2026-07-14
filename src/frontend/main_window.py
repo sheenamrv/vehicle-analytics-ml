@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QDialog,
     QPushButton,
-    QInputDialog,
     QTableView,
 )
 from PySide6.QtCore import (
@@ -46,6 +45,7 @@ from src.data.test_load import get_available_columns, get_datasets, select_col, 
 from src.feature.feature import feature_extract
 from src.frontend.charts import ChartCanvas
 from src.frontend.data_summary import file_summary, missing_summary
+from src.frontend.model_panel import SupervisedModelPage, SupervisedModelSidebar
 from src.frontend.styles import apply_app_styles
 from src.frontend.table_model import PandasTableModel
 from src.frontend.widgets import (
@@ -62,6 +62,7 @@ from src.frontend.widgets import (
     table_view,
     taller_dropdown,
 )
+from src.model.supervised_model import run_supervised_workflow
 
 
 class WorkerSignals(QObject):
@@ -87,6 +88,31 @@ class DataLoadWorker(QRunnable):
             return
 
         self.signals.finished.emit(df)
+
+
+class ModelTrainingWorker(QRunnable):
+    def __init__(self, dataframe, label_column, options):
+        super().__init__()
+        self.dataframe = dataframe.copy()
+        self.label_column = label_column
+        self.options = options
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            result = run_supervised_workflow(
+                df=self.dataframe,
+                label_col=self.label_column,
+                model_type=self.options["model_type"],
+                parameters=self.options["parameters"],
+                test_size=self.options["test_size"],
+                random_state=self.options["random_state"],
+                stratify=self.options["stratify"],
+            )
+        except Exception as error:
+            self.signals.error.emit(error)
+            return
+        self.signals.finished.emit((self.options, result))
 
 
 class QualityIssueTableModel(QAbstractTableModel):
@@ -364,7 +390,9 @@ class AnalyticsWindow(QMainWindow):
             self.on_workflow_tab_changed,
             compact=True,
         )
-        content_layout.addLayout(self.workflow_tabs["layout"])
+        self.workflow_tab_container = QWidget()
+        self.workflow_tab_container.setLayout(self.workflow_tabs["layout"])
+        content_layout.addWidget(self.workflow_tab_container)
 
         self.main_stack = QStackedWidget()
         content_layout.addWidget(self.main_stack, 1)
@@ -374,11 +402,15 @@ class AnalyticsWindow(QMainWindow):
         self._build_feature_page()
         self._build_analysis_page()
         self._build_visualization_page()
+        self._build_models_page()
 
         self.sidebar_stack.addWidget(self._import_sidebar())
         self.sidebar_stack.addWidget(self._feature_sidebar())
         self.sidebar_stack.addWidget(self._analysis_sidebar())
         self.sidebar_stack.addWidget(self._visualization_sidebar())
+        self.model_sidebar = SupervisedModelSidebar()
+        self.model_sidebar.train_requested.connect(self.train_supervised_model)
+        self.sidebar_stack.addWidget(self.model_sidebar)
 
         self.on_top_tab_changed(0)
         self.on_workflow_tab_changed(0)
@@ -781,11 +813,23 @@ class AnalyticsWindow(QMainWindow):
         layout.addWidget(self.visualization_table, 1)
         self.main_stack.addWidget(page)
 
+    def _build_models_page(self):
+        self.model_page = SupervisedModelPage()
+        self.model_page.delete_requested.connect(self.delete_saved_model)
+        self.main_stack.addWidget(self.model_page)
+
 # ============================================================================
 # Navigation & Tab Management
 # ============================================================================
 
     def on_top_tab_changed(self, index):
+        if index == 1:
+            self.top_tabs["buttons"][index].setChecked(True)
+            self.workflow_tab_container.setVisible(False)
+            self.main_stack.setCurrentWidget(self.model_page)
+            self.sidebar_stack.setCurrentWidget(self.model_sidebar)
+            self.refresh_model_page()
+            return
         if index != 0:
             QMessageBox.information(
                 self,
@@ -795,6 +839,8 @@ class AnalyticsWindow(QMainWindow):
             self.top_tabs["buttons"][0].setChecked(True)
             return
         self.top_tabs["buttons"][index].setChecked(True)
+        self.workflow_tab_container.setVisible(True)
+        self.on_workflow_tab_changed(self.workflow_tabs["group"].checkedId())
 
     def on_workflow_tab_changed(self, index):
         """Switch the visible sidebar/page pair for the selected workflow tab."""
@@ -1118,6 +1164,93 @@ class AnalyticsWindow(QMainWindow):
             self.analysis_title.setText("ANALYSIS PREVIEW")
         if hasattr(self, "visualization_title"):
             self.visualization_title.setText("PROJECT SUMMARY")
+        if hasattr(self, "model_page"):
+            self.model_page.set_models([])
+            self.model_page.metrics_model.set_data(pd.DataFrame())
+            self.model_page.confusion_model.set_data(pd.DataFrame())
+
+    # ============================================================================
+    # Supervised Models
+    # ============================================================================
+
+    def refresh_model_page(self):
+        """Synchronize the model workspace with the active project's saved models."""
+        self.model_page.set_models(self.project.get("models", []) if self.project else [])
+
+    def train_supervised_model(self, options):
+        """Run the selected backend classifier without blocking the Qt event loop."""
+        if self.project is None:
+            QMessageBox.warning(
+                self,
+                "No Project",
+                "Create or open a project before training a model.",
+            )
+            return
+
+        df = self.working_df if not self.working_df.empty else self.og_df
+        label = self.project.get("label_column") or self.label_combo.currentText()
+        if df.empty or not label or label not in df.columns:
+            QMessageBox.warning(
+                self,
+                "Training Unavailable",
+                "Select a dataset and a valid label column before training.",
+            )
+            return
+
+        if not options["model_name"]:
+            options["model_name"] = f"{options['model_type'].replace('_', ' ').title()} {len(self.project.get('models', [])) + 1}"
+
+        self.model_sidebar.set_training(True)
+        self.model_page.set_training(True)
+        worker = ModelTrainingWorker(df, label, options)
+        worker.signals.finished.connect(self.on_supervised_model_trained)
+        worker.signals.error.connect(self.on_supervised_model_error)
+        self.thread_pool.start(worker)
+
+    def on_supervised_model_trained(self, payload):
+        options, result = payload
+        self.model_sidebar.set_training(False)
+        self.model_page.set_training(False)
+        self.project.setdefault("models", []).append({
+            "display_name": options["model_name"],
+            "algorithm": options["model_type"],
+            "model": result["model"],
+            "parameters": options["parameters"],
+            "metrics": result["metrics"],
+            "feature_columns": result["features"],
+        })
+        self._set_dirty(True)
+        self.refresh_model_page()
+        self.model_page.set_result(result)
+        QMessageBox.information(
+            self,
+            "Training Complete",
+            f"{options['model_name']} trained successfully.",
+        )
+
+    def on_supervised_model_error(self, error):
+        self.model_sidebar.set_training(False)
+        self.model_page.set_training(False)
+        self.show_error("Training Error", error)
+
+    def delete_saved_model(self, model_name):
+        if self.project is None:
+            return
+        result = QMessageBox.question(
+            self,
+            "Delete Model",
+            f"Delete '{model_name}' from this project?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+        self.project["models"] = [
+            model for model in self.project.get("models", [])
+            if model.get("display_name") != model_name
+        ]
+        self._set_dirty(True)
+        self.refresh_model_page()
 
     def on_preview_header_menu(self, pos):
         header = self.preview_table.horizontalHeader()
