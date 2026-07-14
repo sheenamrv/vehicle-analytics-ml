@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import numpy as np
 import pandas as pd
@@ -46,6 +47,7 @@ from src.feature.feature import feature_extract
 from src.frontend.charts import ChartCanvas
 from src.frontend.data_summary import file_summary, missing_summary
 from src.frontend.model_panel import (
+    MODEL_OPTIONS,
     SemiSupervisedPage,
     SemiSupervisedSidebar,
     SupervisedModelPage,
@@ -484,6 +486,8 @@ class AnalyticsWindow(QMainWindow):
         self.sidebar_stack.addWidget(self._visualization_sidebar())
         self.model_sidebar = SupervisedModelSidebar()
         self.model_sidebar.train_requested.connect(self.train_supervised_model)
+        self.model_sidebar.save_configuration_requested.connect(self.save_model_configuration)
+        self.model_sidebar.load_configuration_requested.connect(self.load_model_configuration)
         self.semi_supervised_sidebar = SemiSupervisedSidebar()
         self.semi_supervised_sidebar.train_requested.connect(self.train_semi_supervised_model)
         self.unsupervised_sidebar = UnsupervisedSidebar()
@@ -1417,6 +1421,29 @@ class AnalyticsWindow(QMainWindow):
         worker.signals.finished.connect(self.on_supervised_model_trained)
         worker.signals.error.connect(self.on_supervised_model_error)
         self.thread_pool.start(worker)
+
+    def save_model_configuration(self, configuration):
+        path, _ = QFileDialog.getSaveFileName(self, "Save Model Configuration", str(self.downloads_dir / "model_configuration.json"), "JSON Files (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as file:
+                json.dump(configuration, file, indent=2)
+        except Exception as error:
+            self.show_error("Configuration Error", error)
+
+    def load_model_configuration(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load Model Configuration", str(self.downloads_dir), "JSON Files (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as file:
+                configuration = json.load(file)
+            if configuration.get("model_type") not in MODEL_OPTIONS.values():
+                raise ValueError("This file does not contain a supported supervised model configuration.")
+            self.model_sidebar.set_configuration(configuration)
+        except Exception as error:
+            self.show_error("Configuration Error", error)
 
     def on_supervised_model_trained(self, payload):
         options, result = payload

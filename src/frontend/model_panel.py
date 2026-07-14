@@ -33,6 +33,8 @@ class SupervisedModelSidebar(QWidget):
     """Collect configuration for the classifiers supported by the backend."""
 
     train_requested = Signal(dict)
+    save_configuration_requested = Signal(dict)
+    load_configuration_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -124,6 +126,12 @@ class SupervisedModelSidebar(QWidget):
         self.train_button = primary_button("Train Model")
         self.train_button.clicked.connect(self._request_training)
         layout.addWidget(self.train_button)
+        save_configuration = secondary_button("Save Configuration")
+        save_configuration.clicked.connect(lambda: self.save_configuration_requested.emit(self.configuration()))
+        layout.addWidget(save_configuration)
+        load_configuration = secondary_button("Load Configuration")
+        load_configuration.clicked.connect(self.load_configuration_requested.emit)
+        layout.addWidget(load_configuration)
         layout.addStretch()
         self._update_parameter_controls()
 
@@ -158,14 +166,36 @@ class SupervisedModelSidebar(QWidget):
         return {"C": self.c_value.value(), "max_iter": self.max_iterations.value()}
 
     def _request_training(self):
-        self.train_requested.emit({
+        self.train_requested.emit(self.configuration())
+
+    def configuration(self):
+        return {
             "model_type": self.selected_model_type(),
             "model_name": self.model_name.text().strip(),
             "parameters": self.parameters(),
             "test_size": self.test_size.value(),
             "random_state": self.random_state.value(),
             "stratify": self.stratify.currentText() == "On",
-        })
+        }
+
+    def set_configuration(self, configuration):
+        model_type = configuration.get("model_type")
+        for label, value in MODEL_OPTIONS.items():
+            if value == model_type:
+                self.model_type.setCurrentText(label)
+                break
+        self.model_name.setText(configuration.get("model_name", ""))
+        parameters = configuration.get("parameters", {})
+        self.c_value.setValue(float(parameters.get("C", 1.0)))
+        if "kernel" in parameters:
+            self.kernel.setCurrentText(parameters["kernel"])
+        self.neighbors.setValue(int(parameters.get("n_neighbors", 5)))
+        self.max_depth.setValue(int(parameters.get("max_depth") or 0))
+        self.n_estimators.setValue(int(parameters.get("n_estimators", 100)))
+        self.max_iterations.setValue(int(parameters.get("max_iter", 1000)))
+        self.test_size.setValue(float(configuration.get("test_size", 0.3)))
+        self.random_state.setValue(int(configuration.get("random_state", 42)))
+        self.stratify.setCurrentText("On" if configuration.get("stratify") else "Off")
 
     def set_training(self, training):
         self.train_button.setEnabled(not training)
