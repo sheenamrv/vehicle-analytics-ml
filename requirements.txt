@@ -10,5 +10,4 @@ joblib
 mrmr-selection
 streamlit
 pyinstaller
-pytest
 pyarrow

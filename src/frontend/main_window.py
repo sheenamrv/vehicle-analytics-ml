@@ -82,6 +82,8 @@ class WorkerSignals(QObject):
     error = Signal(Exception)
 
 
+# Backend workflows can be CPU-heavy. Workers receive DataFrame copies so the
+# GUI thread cannot mutate training input while a job is running.
 class DataLoadWorker(QRunnable):
     def __init__(self, file_path, dataset, columns):
         super().__init__()
@@ -493,6 +495,8 @@ class AnalyticsWindow(QMainWindow):
         self.unsupervised_sidebar = UnsupervisedSidebar()
         self.unsupervised_sidebar.run_requested.connect(self.run_unsupervised_model)
         self.model_sidebar_stack = QStackedWidget()
+        # Keep this order aligned with model_tabs and model_pages. A tab change
+        # uses the same index to switch all three model-workspace surfaces.
         self.model_sidebar_stack.addWidget(self.model_sidebar)
         self.model_sidebar_stack.addWidget(self.semi_supervised_sidebar)
         self.model_sidebar_stack.addWidget(self.unsupervised_sidebar)
@@ -1030,6 +1034,8 @@ class AnalyticsWindow(QMainWindow):
         self.results_pages.setCurrentIndex(index)
 
     def refresh_results_page(self):
+        # Results are a read-only projection of project model metadata. Estimator
+        # objects stay in the project and never enter the table model.
         models = self.project.get("models", []) if self.project else []
         rows = [{
             "name": model.get("display_name", ""),
@@ -1358,6 +1364,8 @@ class AnalyticsWindow(QMainWindow):
             if self.working_df.empty:
                 self.working_df = self.og_df[columns].copy()
             else:
+                # Preserve transformations on columns that remain selected;
+                # newly selected columns are restored from the source dataset.
                 existing = [c for c in columns if c in self.working_df.columns]
                 current = self.working_df[existing].copy()
                 missing = [c for c in columns if c not in existing]
@@ -1395,6 +1403,8 @@ class AnalyticsWindow(QMainWindow):
 
     def refresh_model_page(self):
         """Synchronize the model workspace with the active project's saved models."""
+        # set_models extracts display metadata only; serialized estimators remain
+        # owned by project persistence in src.data.process.
         self.supervised_model_page.set_models(self.project.get("models", []) if self.project else [])
 
     def refresh_semi_supervised_page(self):
@@ -1584,6 +1594,8 @@ class AnalyticsWindow(QMainWindow):
 
         features = train_df.select_dtypes(include="number").columns.drop(label, errors="ignore").tolist()
         expected_features = options["pretrained_model"].get("feature_columns", [])
+        # SelfTrainingClassifier clones the saved estimator, so its incoming
+        # feature order must exactly match the estimator's training contract.
         if features != expected_features:
             QMessageBox.warning(
                 self,
@@ -1689,6 +1701,8 @@ class AnalyticsWindow(QMainWindow):
         options, result = payload
         self.unsupervised_sidebar.set_running(False)
         self.unsupervised_model_page.set_running(False)
+        # Cluster runs are exploratory results, not classifiers; do not append
+        # them to project["models"], which assumes predict/evaluate semantics.
         self.unsupervised_model_page.set_result(result)
         QMessageBox.information(
             self,
@@ -2461,6 +2475,8 @@ class AnalyticsWindow(QMainWindow):
     def update_chart_controls(self):
         """Enable only the chart inputs required by the selected chart type."""
         chart_type = self.chart_type_combo.currentText()
+        # Keep these choices synchronized with visualization_validation_error;
+        # filtering improves UX while validation remains the safety boundary.
         df = self.working_df if not self.working_df.empty else self.og_df
         numeric = [str(column) for column in df.select_dtypes(include="number").columns] if not df.empty else []
         temporal = [str(column) for column in df.select_dtypes(include=["datetime", "datetimetz"]).columns] if not df.empty else []
@@ -2534,6 +2550,8 @@ class AnalyticsWindow(QMainWindow):
 
     @staticmethod
     def visualization_validation_error(df, chart_type, x_column, y_column):
+        # This method is intentionally UI-independent so chart rules can be
+        # unit-tested without rendering a Matplotlib canvas.
         numeric = lambda column: column in df.columns and pd.api.types.is_numeric_dtype(df[column])
         if chart_type in ("Histogram", "Box Plot") and not numeric(x_column):
             return f"{chart_type} requires one numeric primary column."

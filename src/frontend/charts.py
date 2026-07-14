@@ -55,7 +55,8 @@ class ChartCanvas(FigureCanvasQTAgg):
             self.show_empty("Open a dataset to visualize it.")
             return
 
-        # Extension point: add new generic chart types to this dispatch.
+        # Extension point: add chart types here and update both the frontend
+        # column filtering and validation contract in main_window.py.
         if chart_type == "Histogram":
             self._histogram(df, x_col)
         elif chart_type == "Scatter":
@@ -148,6 +149,8 @@ class ChartCanvas(FigureCanvasQTAgg):
             self.show_empty("Train at least one model to compare evaluation metrics.")
             return
 
+        # Long-form data lets Seaborn create one consistent metric group per
+        # model without manually calculating bar offsets.
         plot_df = metrics_df[["name", "accuracy", "precision", "recall", "f1"]].melt(
             id_vars="name",
             value_vars=["accuracy", "precision", "recall", "f1"],

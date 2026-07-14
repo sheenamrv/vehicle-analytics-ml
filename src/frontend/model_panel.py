@@ -29,6 +29,8 @@ MODEL_OPTIONS = {
 }
 
 
+# These widgets collect and display state only. Training orchestration belongs
+# to AnalyticsWindow so panels stay reusable and never call model backends.
 class SupervisedModelSidebar(QWidget):
     """Collect configuration for the classifiers supported by the backend."""
 
@@ -179,6 +181,8 @@ class SupervisedModelSidebar(QWidget):
         }
 
     def set_configuration(self, configuration):
+        # Configuration files store backend identifiers; translate them back to
+        # the human-readable labels used by the algorithm dropdown.
         model_type = configuration.get("model_type")
         for label, value in MODEL_OPTIONS.items():
             if value == model_type:
@@ -338,6 +342,8 @@ class SemiSupervisedSidebar(QWidget):
         layout.addStretch()
 
     def set_pretrained_models(self, models):
+        # A semi-supervised estimator must start from a classifier. Exclude SSL
+        # and clustering entries if project model types expand in the future.
         self._models = [
             model for model in models
             if model.get("algorithm") in set(MODEL_OPTIONS.values())
@@ -493,6 +499,8 @@ class UnsupervisedSidebar(QWidget):
 
     def _update_parameter_controls(self):
         method = self.selected_method()
+        # Parameter rows are created once to keep sidebar geometry stable; only
+        # controls supported by the selected backend clusterer are exposed.
         for label, field, methods in self.parameter_rows:
             label.setVisible(method in methods)
             field.setVisible(method in methods)
