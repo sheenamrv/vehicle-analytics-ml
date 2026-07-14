@@ -1141,24 +1141,27 @@ class AnalyticsWindow(QMainWindow):
 
         method = self.preprocessing_method.currentText()
         applied_columns = []
+        recipe = None
         if method == "Impute with Mean":
             applied_columns = self.impute_columns(columns, method="mean")
+            recipe = {"operation": "impute", "strategy": "mean"}
         elif method == "Impute with Median":
             applied_columns = self.impute_columns(columns, method="median")
+            recipe = {"operation": "impute", "strategy": "median"}
         elif method == "Impute with Mode":
             applied_columns = self.impute_columns(columns, method="mode")
+            recipe = {"operation": "impute", "strategy": "mode"}
         elif method == "Standardize Numeric":
             applied_columns = self.standardize_columns(columns)
+            recipe = {"operation": "standardize"}
         elif method == "Normalize Numeric":
             applied_columns = self.normalize_columns(columns)
+            recipe = {"operation": "normalize"}
 
-        if self.project is not None and applied_columns:
+        if self.project is not None and applied_columns and recipe is not None:
             # Store only effective transformations. This keeps the project
             # recipe reproducible instead of recording rejected or no-op work.
-            self.project.setdefault("preprocessing", []).append({
-                "operation": method,
-                "columns": applied_columns,
-            })
+            self.project.setdefault("preprocessing", []).append({**recipe, "columns": applied_columns})
 
     def reset_workflow_state(self):
         """Clear analysis and visualization state when a new dataset/project loads."""
