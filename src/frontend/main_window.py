@@ -2638,8 +2638,13 @@ class AnalyticsWindow(QMainWindow):
             return f"{chart_type} requires one numeric primary column."
         if chart_type == "Scatter" and not (numeric(x_column) and numeric(y_column)):
             return "Scatter plots require numeric X and Y columns."
-        if chart_type == "Line" and not numeric(y_column):
-            return "Line charts require a numeric Y column."
+        if chart_type == "Line":
+            if x_column not in df.columns:
+                return "Line charts require an X column."
+            if not (numeric(x_column) or pd.api.types.is_datetime64_any_dtype(df[x_column])):
+                return "Line charts require a numeric or datetime X column."
+            if not numeric(y_column):
+                return "Line charts require a numeric Y column."
         if chart_type == "Bar Chart" and (x_column not in df.columns or not numeric(y_column)):
             return "Bar charts require a categorical X column and numeric Y column."
         if chart_type == "Grouped Box Plot" and (x_column not in df.columns or numeric(x_column) or not numeric(y_column)):
