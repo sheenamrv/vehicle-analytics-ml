@@ -1364,14 +1364,16 @@ class AnalyticsWindow(QMainWindow):
             if self.working_df.empty:
                 self.working_df = self.og_df[columns].copy()
             else:
-                # Preserve transformations on columns that remain selected;
-                # newly selected columns are restored from the source dataset.
+                # Preserve transformations on columns that remain selected.
+                # Working-frame indices are source-row identities, so restored
+                # columns must be selected with those same indices after rows
+                # have been removed during data-quality cleanup.
                 existing = [c for c in columns if c in self.working_df.columns]
                 current = self.working_df[existing].copy()
                 missing = [c for c in columns if c not in existing]
                 for col in missing:
                     if col in self.og_df.columns:
-                        current[col] = self.og_df[col]
+                        current[col] = self.og_df.loc[current.index, col]
                 self.working_df = current[columns].copy()
 
         self._set_dirty(True)
@@ -1768,7 +1770,7 @@ class AnalyticsWindow(QMainWindow):
         dialog = DataQualityDialog(self, self.working_df if not self.working_df.empty else self.og_df)
         if dialog.exec() == QDialog.Accepted and dialog.removed_indices:
             df = self.working_df if not self.working_df.empty else self.og_df
-            self.working_df = df.drop(index=dialog.removed_indices).reset_index(drop=True)
+            self.working_df = df.drop(index=dialog.removed_indices)
             self._set_dirty(True)
             self.refresh_import_tables()
 
@@ -2029,7 +2031,7 @@ class AnalyticsWindow(QMainWindow):
             QMessageBox.StandardButton.No,
         ) != QMessageBox.StandardButton.Yes:
             return
-        self.working_df = df.drop(index=duplicates.index).reset_index(drop=True)
+        self.working_df = df.drop(index=duplicates.index)
         self._set_dirty(True)
         self.refresh_import_tables()
 
@@ -2050,7 +2052,7 @@ class AnalyticsWindow(QMainWindow):
             QMessageBox.StandardButton.No,
         ) != QMessageBox.StandardButton.Yes:
             return
-        self.working_df = df.drop(index=missing_rows.index).reset_index(drop=True)
+        self.working_df = df.drop(index=missing_rows.index)
         self._set_dirty(True)
         self.refresh_import_tables()
 
