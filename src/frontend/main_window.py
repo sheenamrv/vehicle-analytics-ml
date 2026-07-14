@@ -63,6 +63,7 @@ from src.frontend.widgets import (
     taller_dropdown,
 )
 from src.model.supervised_model import run_supervised_workflow
+from src.model.model_training import evaluate_saved_models
 
 
 class WorkerSignals(QObject):
@@ -113,6 +114,23 @@ class ModelTrainingWorker(QRunnable):
             self.signals.error.emit(error)
             return
         self.signals.finished.emit((self.options, result))
+
+
+class ModelEvaluationWorker(QRunnable):
+    def __init__(self, models, dataframe, label_column):
+        super().__init__()
+        self.models = models
+        self.dataframe = dataframe.copy()
+        self.label_column = label_column
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            results = evaluate_saved_models(self.models, self.dataframe, self.label_column)
+        except Exception as error:
+            self.signals.error.emit(error)
+            return
+        self.signals.finished.emit(results)
 
 
 class QualityIssueTableModel(QAbstractTableModel):
@@ -816,6 +834,7 @@ class AnalyticsWindow(QMainWindow):
     def _build_models_page(self):
         self.model_page = SupervisedModelPage()
         self.model_page.delete_requested.connect(self.delete_saved_model)
+        self.model_page.test_requested.connect(self.test_saved_models)
         self.main_stack.addWidget(self.model_page)
 
 # ============================================================================
@@ -1251,6 +1270,74 @@ class AnalyticsWindow(QMainWindow):
         ]
         self._set_dirty(True)
         self.refresh_model_page()
+
+    def test_saved_models(self, model_names):
+        """Evaluate selected project models against a user-selected labelled dataset."""
+        if not self.project or not model_names:
+            QMessageBox.warning(self, "No Models Selected", "Select at least one saved model to test.")
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Test Dataset",
+            str(self.downloads_dir),
+            "Data Files (*.csv *.xlsx *.xls *.mat);;All Files (*.*)",
+        )
+        if not path:
+            return
+
+        try:
+            datasets = get_datasets(Path(path))
+            if not datasets:
+                raise ValueError("No datasets were found in the selected file.")
+            dataset = datasets[0]
+            if len(datasets) > 1:
+                dataset, accepted = QInputDialog.getItem(
+                    self, "Select Test Dataset", "Dataset", datasets, 0, False,
+                )
+                if not accepted:
+                    return
+            columns = get_available_columns(Path(path), dataset)
+            label, accepted = QInputDialog.getItem(
+                self,
+                "Select Test Label",
+                "Label column",
+                [str(column) for column in columns],
+                max(0, columns.index(self.project.get("label_column")))
+                if self.project.get("label_column") in columns else 0,
+                False,
+            )
+            if not accepted:
+                return
+            test_df = select_col(Path(path), dataset, columns)
+        except Exception as error:
+            self.show_error("Test Dataset Error", error)
+            return
+
+        selected_models = [
+            model for model in self.project.get("models", [])
+            if model.get("display_name") in model_names
+        ]
+        self.model_sidebar.set_training(True)
+        self.model_page.set_training(True)
+        worker = ModelEvaluationWorker(selected_models, test_df, label)
+        worker.signals.finished.connect(self.on_models_tested)
+        worker.signals.error.connect(self.on_supervised_model_error)
+        self.thread_pool.start(worker)
+
+    def on_models_tested(self, results):
+        self.model_sidebar.set_training(False)
+        self.model_page.set_training(False)
+        if not results:
+            QMessageBox.warning(self, "Test Results", "No model results were returned.")
+            return
+        comparison = pd.DataFrame([
+            {"model": item["name"], **item["metrics"]}
+            for item in results
+        ])
+        self.model_page.metrics_model.set_data(comparison.round(4))
+        self.model_page.confusion_model.set_data(pd.DataFrame(results[0]["confusion_matrix"]))
+        QMessageBox.information(self, "Testing Complete", f"Tested {len(results)} model(s).")
 
     def on_preview_header_menu(self, pos):
         header = self.preview_table.horizontalHeader()

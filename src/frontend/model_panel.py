@@ -1,6 +1,7 @@
 import pandas as pd
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -174,6 +175,7 @@ class SupervisedModelPage(QWidget):
     """Display trained models and the most recent classifier evaluation."""
 
     delete_requested = Signal(str)
+    test_requested = Signal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -192,11 +194,15 @@ class SupervisedModelPage(QWidget):
         self.delete_button = secondary_button("Delete Selected")
         self.delete_button.clicked.connect(self._delete_selected)
         header.addWidget(self.delete_button)
+        self.test_button = primary_button("Test Selected")
+        self.test_button.clicked.connect(self._test_selected)
+        header.addWidget(self.test_button)
         layout.addLayout(header)
 
         self.model_table = QTableView()
         self.model_table.setModel(self.model_table_model)
         self.model_table.setSelectionBehavior(QTableView.SelectRows)
+        self.model_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.model_table.setAlternatingRowColors(True)
         self.model_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.model_table, 2)
@@ -248,3 +254,10 @@ class SupervisedModelPage(QWidget):
         indexes = self.model_table.selectionModel().selectedRows()
         if indexes:
             self.delete_requested.emit(self.model_table_model._data.iloc[indexes[0].row()]["name"])
+
+    def _test_selected(self):
+        names = [
+            self.model_table_model._data.iloc[index.row()]["name"]
+            for index in self.model_table.selectionModel().selectedRows()
+        ]
+        self.test_requested.emit(names)
