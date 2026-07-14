@@ -1708,7 +1708,13 @@ class AnalyticsWindow(QMainWindow):
         options, result = payload
         self.semi_supervised_sidebar.set_training(False)
         self.semi_supervised_model_page.set_training(False)
-        name = f"Self-Training {len(self.project.get('models', [])) + 1}"
+        existing_names = {m.get("display_name") for m in self.project.get("models", [])}
+        base_name = "Self-Training"
+        counter = 1
+        name = f"{base_name} {counter}"
+        while name in existing_names:
+            counter += 1
+            name = f"{base_name} {counter}"
         self.project.setdefault("models", []).append({
             "display_name": name,
             "algorithm": "semi_supervised",
