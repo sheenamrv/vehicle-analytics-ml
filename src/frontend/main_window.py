@@ -476,6 +476,7 @@ class AnalyticsWindow(QMainWindow):
         self._build_analysis_page()
         self._build_visualization_page()
         self._build_models_page()
+        self._build_results_page()
 
         self.sidebar_stack.addWidget(self._import_sidebar())
         self.sidebar_stack.addWidget(self._feature_sidebar())
@@ -492,6 +493,7 @@ class AnalyticsWindow(QMainWindow):
         self.model_sidebar_stack.addWidget(self.semi_supervised_sidebar)
         self.model_sidebar_stack.addWidget(self.unsupervised_sidebar)
         self.sidebar_stack.addWidget(self.model_sidebar_stack)
+        self.sidebar_stack.addWidget(self._results_sidebar())
 
         self.on_top_tab_changed(0)
         self.on_workflow_tab_changed(0)
@@ -632,6 +634,19 @@ class AnalyticsWindow(QMainWindow):
         refresh = primary_button("Refresh Summary")
         refresh.clicked.connect(self.refresh_visualization_summary)
         layout.addWidget(refresh)
+        layout.addStretch()
+        return panel
+
+    def _results_sidebar(self):
+        panel = sidebar_base()
+        layout = panel.layout()
+        layout.addWidget(section_label("RESULTS"))
+        refresh = primary_button("Refresh Results")
+        refresh.clicked.connect(self.refresh_results_page)
+        layout.addWidget(refresh)
+        export = secondary_button("Export Comparison")
+        export.clicked.connect(self.export_results_comparison)
+        layout.addWidget(export)
         layout.addStretch()
         return panel
 
@@ -918,6 +933,37 @@ class AnalyticsWindow(QMainWindow):
         layout.addWidget(self.model_pages, 1)
         self.main_stack.addWidget(self.model_page)
 
+    def _build_results_page(self):
+        self.results_page = QWidget()
+        layout = QVBoxLayout(self.results_page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        self.results_tabs = tab_row(self, ["Results", "Comparisons"], self.on_results_tab_changed, compact=True)
+        layout.addLayout(self.results_tabs["layout"])
+        self.results_pages = QStackedWidget()
+        self.results_model = PandasTableModel()
+        self.result_details_model = PandasTableModel()
+        self.comparison_model = PandasTableModel()
+
+        results_view = QWidget()
+        results_layout = QVBoxLayout(results_view)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.addWidget(section_label("TRAINED MODELS"))
+        self.results_table = table_view(self.results_model)
+        self.results_table.selectionModel().selectionChanged.connect(self.on_result_selection_changed)
+        results_layout.addWidget(self.results_table, 2)
+        results_layout.addWidget(data_panel("TRAINING INFO", self.result_details_model), 1)
+
+        comparison_view = QWidget()
+        comparison_layout = QVBoxLayout(comparison_view)
+        comparison_layout.setContentsMargins(0, 0, 0, 0)
+        comparison_layout.addWidget(section_label("COMPARISON OVERVIEW"))
+        comparison_layout.addWidget(data_panel("METRICS OVERVIEW", self.comparison_model), 1)
+        self.results_pages.addWidget(results_view)
+        self.results_pages.addWidget(comparison_view)
+        layout.addWidget(self.results_pages, 1)
+        self.main_stack.addWidget(self.results_page)
+
 # ============================================================================
 # Navigation & Tab Management
 # ============================================================================
@@ -929,6 +975,13 @@ class AnalyticsWindow(QMainWindow):
             self.main_stack.setCurrentWidget(self.model_page)
             self.sidebar_stack.setCurrentWidget(self.model_sidebar_stack)
             self.refresh_model_page()
+            return
+        if index == 2:
+            self.top_tabs["buttons"][index].setChecked(True)
+            self.workflow_tab_container.setVisible(False)
+            self.main_stack.setCurrentWidget(self.results_page)
+            self.sidebar_stack.setCurrentIndex(5)
+            self.refresh_results_page()
             return
         if index != 0:
             QMessageBox.information(
@@ -959,6 +1012,49 @@ class AnalyticsWindow(QMainWindow):
             self.refresh_model_page()
         elif index == 1:
             self.refresh_semi_supervised_page()
+
+    def on_results_tab_changed(self, index):
+        self.results_tabs["buttons"][index].setChecked(True)
+        self.results_pages.setCurrentIndex(index)
+
+    def refresh_results_page(self):
+        models = self.project.get("models", []) if self.project else []
+        rows = [{
+            "name": model.get("display_name", ""),
+            "algorithm": model.get("algorithm", ""),
+            "accuracy": model.get("metrics", {}).get("accuracy"),
+            "precision": model.get("metrics", {}).get("precision"),
+            "recall": model.get("metrics", {}).get("recall"),
+            "f1": model.get("metrics", {}).get("f1"),
+        } for model in models]
+        comparison = pd.DataFrame(rows, columns=["name", "algorithm", "accuracy", "precision", "recall", "f1"])
+        self.results_model.set_data(comparison)
+        self.comparison_model.set_data(comparison)
+        self.result_details_model.set_data(pd.DataFrame())
+
+    def on_result_selection_changed(self, selected, deselected):
+        indexes = self.results_table.selectionModel().selectedRows()
+        if not indexes or not self.project:
+            return
+        name = self.results_model._data.iloc[indexes[0].row()]["name"]
+        model = next((item for item in self.project.get("models", []) if item.get("display_name") == name), {})
+        details = [("algorithm", model.get("algorithm", "")), ("features", ", ".join(model.get("feature_columns", [])))]
+        details.extend((f"parameter: {key}", value) for key, value in model.get("parameters", {}).items())
+        self.result_details_model.set_data(pd.DataFrame(details, columns=["field", "value"]))
+
+    def export_results_comparison(self):
+        if self.comparison_model._data.empty:
+            QMessageBox.warning(self, "No Results", "There are no saved model results to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export Model Comparison", str(self.downloads_dir / "model_results.csv"), "CSV Files (*.csv)")
+        if not path:
+            return
+        try:
+            self.comparison_model._data.to_csv(path, index=False)
+        except Exception as error:
+            self.show_error("Export Error", error)
+            return
+        QMessageBox.information(self, "Export Complete", f"Saved {path}")
 
     def _set_dirty(self, dirty=True):
         if self._suppress_dirty and dirty:
