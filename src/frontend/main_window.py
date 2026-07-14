@@ -1140,23 +1140,24 @@ class AnalyticsWindow(QMainWindow):
             return
 
         method = self.preprocessing_method.currentText()
+        applied_columns = []
         if method == "Impute with Mean":
-            self.impute_columns(columns, method="mean")
+            applied_columns = self.impute_columns(columns, method="mean")
         elif method == "Impute with Median":
-            self.impute_columns(columns, method="median")
+            applied_columns = self.impute_columns(columns, method="median")
         elif method == "Impute with Mode":
-            self.impute_columns(columns, method="mode")
+            applied_columns = self.impute_columns(columns, method="mode")
         elif method == "Standardize Numeric":
-            self.standardize_columns(columns)
+            applied_columns = self.standardize_columns(columns)
         elif method == "Normalize Numeric":
-            self.normalize_columns(columns)
+            applied_columns = self.normalize_columns(columns)
 
-        if self.project is not None:
-            # Store a reproducibility trail alongside the transformed working
-            # DataFrame; the backend project writer persists this metadata.
+        if self.project is not None and applied_columns:
+            # Store only effective transformations. This keeps the project
+            # recipe reproducible instead of recording rejected or no-op work.
             self.project.setdefault("preprocessing", []).append({
                 "operation": method,
-                "columns": list(columns),
+                "columns": applied_columns,
             })
 
     def reset_workflow_state(self):
@@ -1248,9 +1249,11 @@ class AnalyticsWindow(QMainWindow):
         df = self.working_df if not self.working_df.empty else self.og_df
         if df.empty:
             QMessageBox.warning(self, "No Data", "Load a dataset before imputing values.")
-            return
+            return []
 
+        applied_columns = []
         for col in columns:
+            before = df[col].copy()
             if method == "custom":
                 value, ok = QInputDialog.getText(self, "Custom Imputation", f"Value for {col}:")
                 if not ok:
@@ -1315,9 +1318,13 @@ class AnalyticsWindow(QMainWindow):
                     )
                     continue
 
+            if not df[col].equals(before):
+                applied_columns.append(col)
+
         self.working_df = df
         self._set_dirty(True)
         self.refresh_import_tables()
+        return applied_columns
 
     def _parse_custom_impute_value(self, value, dtype):
         try:
@@ -1430,24 +1437,28 @@ class AnalyticsWindow(QMainWindow):
         numeric_cols = [col for col in columns if pd.api.types.is_numeric_dtype(df[col])]
         if not numeric_cols:
             QMessageBox.warning(self, "Standardize", "Select numeric columns to standardize.")
-            return
+            return []
+        before = df[numeric_cols].copy()
         scaler = StandardScaler()
         df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
         self.working_df = df
         self._set_dirty(True)
         self.refresh_import_tables()
+        return [col for col in numeric_cols if not df[col].equals(before[col])]
 
     def normalize_columns(self, columns):
         df = self.working_df if not self.working_df.empty else self.og_df
         numeric_cols = [col for col in columns if pd.api.types.is_numeric_dtype(df[col])]
         if not numeric_cols:
             QMessageBox.warning(self, "Normalize", "Select numeric columns to normalize.")
-            return
+            return []
+        before = df[numeric_cols].copy()
         scaler = MinMaxScaler()
         df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
         self.working_df = df
         self._set_dirty(True)
         self.refresh_import_tables()
+        return [col for col in numeric_cols if not df[col].equals(before[col])]
 
     def highlight_missing_rows(self):
         df = self.working_df if not self.working_df.empty else self.og_df
