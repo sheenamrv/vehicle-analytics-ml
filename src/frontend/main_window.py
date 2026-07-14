@@ -50,6 +50,8 @@ from src.frontend.model_panel import (
     SemiSupervisedSidebar,
     SupervisedModelPage,
     SupervisedModelSidebar,
+    UnsupervisedPage,
+    UnsupervisedSidebar,
 )
 from src.frontend.styles import apply_app_styles
 from src.frontend.table_model import PandasTableModel
@@ -70,6 +72,7 @@ from src.frontend.widgets import (
 from src.model.supervised_model import run_supervised_workflow
 from src.model.model_training import evaluate_saved_models
 from src.model.semisupervised_model import run_ssl_workflow
+from src.model.unsupervised_model import run_unsupervised_workflow
 
 
 class WorkerSignals(QObject):
@@ -157,6 +160,27 @@ class SemiSupervisedTrainingWorker(QRunnable):
                 pretrained_model=self.options["pretrained_model"]["model"],
                 threshold=self.options["threshold"],
                 max_iter=self.options["max_iter"],
+            )
+        except Exception as error:
+            self.signals.error.emit(error)
+            return
+        self.signals.finished.emit((self.options, result))
+
+
+class UnsupervisedTrainingWorker(QRunnable):
+    def __init__(self, dataframe, label_column, options):
+        super().__init__()
+        self.dataframe = dataframe.copy()
+        self.label_column = label_column
+        self.options = options
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            result = run_unsupervised_workflow(
+                df=self.dataframe,
+                label=self.label_column,
+                **self.options,
             )
         except Exception as error:
             self.signals.error.emit(error)
@@ -461,9 +485,12 @@ class AnalyticsWindow(QMainWindow):
         self.model_sidebar.train_requested.connect(self.train_supervised_model)
         self.semi_supervised_sidebar = SemiSupervisedSidebar()
         self.semi_supervised_sidebar.train_requested.connect(self.train_semi_supervised_model)
+        self.unsupervised_sidebar = UnsupervisedSidebar()
+        self.unsupervised_sidebar.run_requested.connect(self.run_unsupervised_model)
         self.model_sidebar_stack = QStackedWidget()
         self.model_sidebar_stack.addWidget(self.model_sidebar)
         self.model_sidebar_stack.addWidget(self.semi_supervised_sidebar)
+        self.model_sidebar_stack.addWidget(self.unsupervised_sidebar)
         self.sidebar_stack.addWidget(self.model_sidebar_stack)
 
         self.on_top_tab_changed(0)
@@ -874,7 +901,7 @@ class AnalyticsWindow(QMainWindow):
         layout.setSpacing(12)
         self.model_tabs = tab_row(
             self,
-            ["Supervised", "Semi-Supervised"],
+            ["Supervised", "Semi-Supervised", "Unsupervised"],
             self.on_model_tab_changed,
             compact=True,
         )
@@ -884,8 +911,10 @@ class AnalyticsWindow(QMainWindow):
         self.supervised_model_page.delete_requested.connect(self.delete_saved_model)
         self.supervised_model_page.test_requested.connect(self.test_saved_models)
         self.semi_supervised_model_page = SemiSupervisedPage()
+        self.unsupervised_model_page = UnsupervisedPage()
         self.model_pages.addWidget(self.supervised_model_page)
         self.model_pages.addWidget(self.semi_supervised_model_page)
+        self.model_pages.addWidget(self.unsupervised_model_page)
         layout.addWidget(self.model_pages, 1)
         self.main_stack.addWidget(self.model_page)
 
@@ -928,7 +957,7 @@ class AnalyticsWindow(QMainWindow):
         self.model_sidebar_stack.setCurrentIndex(index)
         if index == 0:
             self.refresh_model_page()
-        else:
+        elif index == 1:
             self.refresh_semi_supervised_page()
 
     def _set_dirty(self, dirty=True):
@@ -1249,6 +1278,7 @@ class AnalyticsWindow(QMainWindow):
             self.supervised_model_page.metrics_model.set_data(pd.DataFrame())
             self.supervised_model_page.confusion_model.set_data(pd.DataFrame())
             self.semi_supervised_model_page.clear()
+            self.unsupervised_model_page.clear()
 
     # ============================================================================
     # Supervised Models
@@ -1495,6 +1525,49 @@ class AnalyticsWindow(QMainWindow):
         self.semi_supervised_sidebar.set_training(False)
         self.semi_supervised_model_page.set_training(False)
         self.show_error("Self-Training Error", error)
+
+    def run_unsupervised_model(self, options):
+        """Cluster the active dataset without requiring a labelled target column."""
+        if self.project is None:
+            QMessageBox.warning(self, "No Project", "Create or open a project before running clustering.")
+            return
+
+        df = self.working_df if not self.working_df.empty else self.og_df
+        if df.empty:
+            QMessageBox.warning(self, "Clustering Unavailable", "Open a dataset with numeric features before running clustering.")
+            return
+        label = self.project.get("label_column") or self.label_combo.currentText()
+        numeric_features = df.select_dtypes(include="number").columns.drop(label, errors="ignore").tolist()
+        if len(numeric_features) < 2:
+            QMessageBox.warning(
+                self,
+                "Clustering Unavailable",
+                "Clustering needs at least two numeric feature columns in the active dataset.",
+            )
+            return
+
+        self.unsupervised_sidebar.set_running(True)
+        self.unsupervised_model_page.set_running(True)
+        worker = UnsupervisedTrainingWorker(df, label, options)
+        worker.signals.finished.connect(self.on_unsupervised_model_finished)
+        worker.signals.error.connect(self.on_unsupervised_model_error)
+        self.thread_pool.start(worker)
+
+    def on_unsupervised_model_finished(self, payload):
+        options, result = payload
+        self.unsupervised_sidebar.set_running(False)
+        self.unsupervised_model_page.set_running(False)
+        self.unsupervised_model_page.set_result(result)
+        QMessageBox.information(
+            self,
+            "Clustering Complete",
+            f"{options['method'].replace('_', ' ').title()} clustering finished successfully.",
+        )
+
+    def on_unsupervised_model_error(self, error):
+        self.unsupervised_sidebar.set_running(False)
+        self.unsupervised_model_page.set_running(False)
+        self.show_error("Clustering Error", error)
 
     def on_preview_header_menu(self, pos):
         header = self.preview_table.horizontalHeader()

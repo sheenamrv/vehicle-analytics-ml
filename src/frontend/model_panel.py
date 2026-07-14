@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.frontend.table_model import PandasTableModel
+from src.frontend.charts import ChartCanvas
 from src.frontend.widgets import data_panel, divider, primary_button, secondary_button, section_label, taller_dropdown
 
 
@@ -383,5 +384,150 @@ class SemiSupervisedPage(QWidget):
         if training:
             self.progress.setRange(0, 0)
             self.progress.setFormat("Training self-training model...")
+        else:
+            self.progress.setRange(0, 1)
+
+
+UNSUPERVISED_OPTIONS = {
+    "K-Means": "kmeans",
+    "DBSCAN": "dbscan",
+    "Hierarchical": "hierarchical",
+}
+
+
+class UnsupervisedSidebar(QWidget):
+    """Configure a backend-supported clustering run."""
+
+    run_requested = Signal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 28, 26, 22)
+        layout.setSpacing(9)
+
+        brand = QLabel("Classify & Learn Lab")
+        brand.setObjectName("brand")
+        layout.addWidget(brand)
+        layout.addSpacing(26)
+        layout.addWidget(section_label("UNSUPERVISED CLUSTERING"))
+
+        self.method = taller_dropdown(QComboBox())
+        self.method.addItems(UNSUPERVISED_OPTIONS)
+        self.method.currentTextChanged.connect(self._update_parameter_controls)
+        layout.addWidget(QLabel("Method"))
+        layout.addWidget(self.method)
+        layout.addWidget(divider())
+
+        layout.addWidget(section_label("PARAMETERS"))
+        self.n_clusters = QSpinBox()
+        self.n_clusters.setRange(2, 100)
+        self.n_clusters.setValue(3)
+        self.eps = QDoubleSpinBox()
+        self.eps.setRange(0.01, 1000.0)
+        self.eps.setValue(0.5)
+        self.eps.setDecimals(2)
+        self.eps.setSingleStep(0.1)
+        self.min_samples = QSpinBox()
+        self.min_samples.setRange(1, 1000)
+        self.min_samples.setValue(5)
+        self.linkage = taller_dropdown(QComboBox())
+        self.linkage.addItems(["ward", "complete", "average", "single"])
+        self.random_state = QSpinBox()
+        self.random_state.setRange(0, 999999)
+        self.random_state.setValue(42)
+
+        self.parameter_form = QFormLayout()
+        self.parameter_form.setContentsMargins(0, 0, 0, 0)
+        self.parameter_form.setSpacing(7)
+        self.parameter_rows = []
+        for label, field, methods in (
+            ("Clusters", self.n_clusters, {"kmeans", "hierarchical"}),
+            ("Epsilon", self.eps, {"dbscan"}),
+            ("Min samples", self.min_samples, {"dbscan"}),
+            ("Linkage", self.linkage, {"hierarchical"}),
+            ("Random state", self.random_state, {"kmeans"}),
+        ):
+            self.parameter_form.addRow(label, field)
+            self.parameter_rows.append((self.parameter_form.labelForField(field), field, methods))
+        layout.addLayout(self.parameter_form)
+
+        self.run_button = primary_button("Run Clustering")
+        self.run_button.clicked.connect(self._request_run)
+        layout.addWidget(self.run_button)
+        layout.addStretch()
+        self._update_parameter_controls()
+
+    def selected_method(self):
+        return UNSUPERVISED_OPTIONS[self.method.currentText()]
+
+    def _update_parameter_controls(self):
+        method = self.selected_method()
+        for label, field, methods in self.parameter_rows:
+            label.setVisible(method in methods)
+            field.setVisible(method in methods)
+
+    def _request_run(self):
+        self.run_requested.emit({
+            "method": self.selected_method(),
+            "n_clusters": self.n_clusters.value(),
+            "eps": self.eps.value(),
+            "min_samples": self.min_samples.value(),
+            "linkage": self.linkage.currentText(),
+            "random_state": self.random_state.value(),
+        })
+
+    def set_running(self, running):
+        self.run_button.setEnabled(not running)
+        self.method.setEnabled(not running)
+        self.run_button.setText("Clustering..." if running else "Run Clustering")
+
+
+class UnsupervisedPage(QWidget):
+    """Display cluster assignments, quality scores, and a PCA projection."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.metrics_model = PandasTableModel()
+        self.summary_model = PandasTableModel()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        layout.addWidget(section_label("CLUSTERING RESULTS"))
+
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(True)
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+
+        upper = QHBoxLayout()
+        upper.setSpacing(16)
+        self.chart = ChartCanvas("Run clustering to view the PCA projection.", min_height=300)
+        upper.addWidget(self.chart, 2)
+        upper.addWidget(data_panel("CLUSTER COUNTS", self.summary_model), 1)
+        layout.addLayout(upper, 2)
+        layout.addWidget(data_panel("CLUSTER QUALITY", self.metrics_model), 1)
+
+    def set_result(self, result):
+        self.summary_model.set_data(result["summary_df"])
+        metrics = pd.DataFrame([
+            {"metric": key.replace("_", " ").title(), "value": value}
+            for key, value in result["metrics"].items()
+            if value is not None
+        ])
+        self.metrics_model.set_data(metrics.round(4))
+        self.chart.plot_pca_scatter(result["pca_result"]["pca_df"], "cluster")
+
+    def clear(self):
+        self.summary_model.set_data(pd.DataFrame())
+        self.metrics_model.set_data(pd.DataFrame())
+        self.chart.show_empty("Run clustering to view the PCA projection.")
+
+    def set_running(self, running):
+        self.progress.setVisible(running)
+        if running:
+            self.progress.setRange(0, 0)
+            self.progress.setFormat("Running clustering...")
         else:
             self.progress.setRange(0, 1)
