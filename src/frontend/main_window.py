@@ -2590,7 +2590,7 @@ class AnalyticsWindow(QMainWindow):
         )
         self.chart_x_combo.setEnabled(needs_x)
         self.chart_y_combo.setEnabled(needs_y)
-        self.chart_label_combo.setEnabled(chart_type in ("Scatter", "Grouped Box Plot"))
+        self.chart_label_combo.setEnabled(chart_type == "Scatter")
 
     def render_visualization(self):
         """Render the selected generic visualization against the active dataset."""
