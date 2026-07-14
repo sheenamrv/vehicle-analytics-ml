@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QFrame,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -42,7 +44,7 @@ from src.analysis.analysis import (
     pca_analysis,
 )
 from src.data.process import load_project, save_project
-from src.data.test_load import get_available_columns, get_datasets, select_col, change_dtype
+from src.data.test_load import get_available_columns, get_datasets, select_col
 from src.feature.feature import feature_extract
 from src.frontend.charts import ChartCanvas
 from src.frontend.data_summary import file_summary, missing_summary
@@ -256,6 +258,15 @@ CHART_TYPES = [
     "Grouped Box Plot",
 ]
 
+DTYPE_OPTIONS = [
+    ("Integer", "int64"),
+    ("Decimal", "float64"),
+    ("Text", "string"),
+    ("Boolean", "boolean"),
+    ("Date / Time", "datetime64[ns]"),
+    ("Category", "category"),
+]
+
 # ============================================================================
 # Main Application Window
 # ============================================================================
@@ -343,8 +354,13 @@ class AnalyticsWindow(QMainWindow):
         root_layout.setSpacing(0)
 
         self.sidebar_stack = QStackedWidget()
-        self.sidebar_stack.setFixedWidth(SIDEBAR_WIDTH)
-        root_layout.addWidget(self.sidebar_stack)
+        self.sidebar_scroll = QScrollArea()
+        self.sidebar_scroll.setWidgetResizable(True)
+        self.sidebar_scroll.setFrameShape(QFrame.NoFrame)
+        self.sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sidebar_scroll.setFixedWidth(SIDEBAR_WIDTH)
+        self.sidebar_scroll.setWidget(self.sidebar_stack)
+        root_layout.addWidget(self.sidebar_scroll)
 
         # Main content keeps the two-level tab layout from the design mockup.
         content = QWidget()
@@ -425,6 +441,23 @@ class AnalyticsWindow(QMainWindow):
         self.column_picker.selectionChange.connect(self.update_selected_columns)
 
         layout.addWidget(self.column_picker)
+
+        layout.addWidget(section_label("DATA TYPES"))
+        self.dtype_column_combo = taller_dropdown(QComboBox())
+        self.dtype_column_combo.currentTextChanged.connect(self.update_dtype_choices)
+        layout.addWidget(QLabel("Column"))
+        layout.addWidget(self.dtype_column_combo)
+
+        self.dtype_combo = taller_dropdown(QComboBox())
+        layout.addWidget(QLabel("Convert To"))
+        layout.addWidget(self.dtype_combo)
+
+        apply_dtype = primary_button("Apply Data Type")
+        apply_dtype.clicked.connect(self.apply_dtype_change)
+        layout.addWidget(apply_dtype)
+        revert_dtype = secondary_button("Revert Data Type")
+        revert_dtype.clicked.connect(self.revert_active_dtype)
+        layout.addWidget(revert_dtype)
 
         self.project_name = QLineEdit()
         self.project_name.setMinimumWidth(210)
@@ -633,15 +666,83 @@ class AnalyticsWindow(QMainWindow):
     # ============================================================================
     # Data Type Conversion
     # ============================================================================
+    def populate_dtype_controls(self, preferred_column=None):
+        """Show active feature/label columns and their current working dtypes."""
+        if not hasattr(self, "dtype_column_combo"):
+            return
+
+        df = self.working_df if not self.working_df.empty else self.og_df
+        columns = [str(column) for column in df.columns] if not df.empty else []
+        current = preferred_column or self.dtype_column_combo.currentText()
+
+        self.dtype_column_combo.blockSignals(True)
+        self.dtype_column_combo.clear()
+        self.dtype_column_combo.addItems(columns)
+        if current in columns:
+            self.dtype_column_combo.setCurrentText(current)
+        self.dtype_column_combo.blockSignals(False)
+        self.dtype_column_combo.setEnabled(bool(columns))
+        self.update_dtype_choices()
+
+    def update_dtype_choices(self):
+        """Refresh type choices and select the active column's current dtype."""
+        column = self.dtype_column_combo.currentText()
+        df = self.working_df if not self.working_df.empty else self.og_df
+
+        self.dtype_combo.blockSignals(True)
+        self.dtype_combo.clear()
+        for label, dtype in DTYPE_OPTIONS:
+            self.dtype_combo.addItem(label, dtype)
+
+        if column in df.columns:
+            current_dtype = self._canonical_dtype(str(df[column].dtype))
+            index = self.dtype_combo.findData(current_dtype)
+            if index >= 0:
+                self.dtype_combo.setCurrentIndex(index)
+        self.dtype_combo.blockSignals(False)
+        self.dtype_combo.setEnabled(column in df.columns)
+
+    def apply_dtype_change(self):
+        """Apply the datatype selected in the beginning workflow sidebar."""
+        column = self.dtype_column_combo.currentText()
+        dtype = self.dtype_combo.currentData()
+        if not column or not dtype:
+            QMessageBox.warning(self, "Change Data Type", "Select a column and data type first.")
+            return
+        self.change_column_type(column, dtype)
+
+    def revert_active_dtype(self):
+        """Restore the selected column to the dtype detected at dataset load."""
+        column = self.dtype_column_combo.currentText()
+        if not column:
+            QMessageBox.warning(self, "Revert Data Type", "Select a column first.")
+            return
+        self.revert_dtype_conversion([column])
+
+    def _sync_project_column_types(self):
+        """Keep persisted dtype metadata aligned with the working DataFrame."""
+        if self.project is not None and not self.working_df.empty:
+            self.project["column_types"] = {
+                col: str(self.working_df[col].dtype)
+                for col in self.working_df.columns
+            }
+
+    def _finish_dtype_change(self, column_name):
+        self._sync_project_column_types()
+        self._set_dirty(True)
+        self.refresh_import_tables()
+        self.populate_visualization_controls()
+        self.populate_dtype_controls(column_name)
+
     def change_column_type(self, column_name, new_dtype):
         df = self.working_df if not self.working_df.empty else self.og_df
         if df.empty or column_name not in df.columns:
             QMessageBox.warning(self, "No Data", f"Column '{column_name}' is not available for conversion.")
-            return
+            return False
 
         current_dtype = str(df[column_name].dtype)
-        if current_dtype == new_dtype:
-            return
+        if self._canonical_dtype(current_dtype) == self._canonical_dtype(new_dtype):
+            return False
 
         series = df[column_name]
         if new_dtype in ("int", "int64") and pd.api.types.is_float_dtype(series.dtype):
@@ -656,7 +757,7 @@ class AnalyticsWindow(QMainWindow):
                     QMessageBox.StandardButton.Cancel,
                 )
                 if result == QMessageBox.StandardButton.Cancel:
-                    return
+                    return False
                 if result == QMessageBox.StandardButton.Yes:
                     series = np.ceil(series)
                 else:
@@ -669,14 +770,12 @@ class AnalyticsWindow(QMainWindow):
                         "Conversion Failed",
                         f"Could not convert '{column_name}' to {new_dtype}:\n\n{error}"
                     )
-                    return
+                    return False
                 if self.working_df.empty:
                     self.working_df = df.copy()
                 self.working_df[column_name] = converted
-                self._set_dirty(True)
-                self.refresh_import_tables()
-                self.populate_visualization_controls()
-                return
+                self._finish_dtype_change(column_name)
+                return True
 
         if not self._can_convert_dtype(series, new_dtype):
             QMessageBox.warning(
@@ -684,19 +783,17 @@ class AnalyticsWindow(QMainWindow):
                 "Conversion Not Allowed",
                 f"Column '{column_name}' cannot be converted to {new_dtype}.\n\nPlease change the type or correct the column values first."
             )
-            return
+            return False
 
         try:
             if self.working_df.empty:
                 self.working_df = df.copy()
-            self.working_df = change_dtype(
-                self.working_df,
-                column_name,
-                new_dtype
+            self.working_df[column_name] = self._convert_series_dtype(
+                self.working_df[column_name],
+                new_dtype,
             )
-            self._set_dirty(True)
-            self.refresh_import_tables()
-            self.populate_visualization_controls()
+            self._finish_dtype_change(column_name)
+            return True
 
         except Exception as e:
             QMessageBox.warning(
@@ -705,6 +802,7 @@ class AnalyticsWindow(QMainWindow):
                 f"Could not convert '{column_name}' to {new_dtype}\n\n{e}"
             )
             self.refresh_import_tables()
+            return False
 
     def _canonical_dtype(self, dtype_name):
         if dtype_name in ("int", "Int64", "int64"):
@@ -713,8 +811,12 @@ class AnalyticsWindow(QMainWindow):
             return "float64"
         if dtype_name in ("bool", "boolean"):
             return "boolean"
-        if dtype_name in ("string", "object"):
+        if dtype_name in ("str", "string", "object"):
             return "string"
+        if dtype_name.startswith("datetime64"):
+            return "datetime64[ns]"
+        if dtype_name == "category":
+            return "category"
         return dtype_name
 
     def _can_convert_dtype(self, series, dtype):
@@ -728,6 +830,10 @@ class AnalyticsWindow(QMainWindow):
                 series.astype("string")
             elif canonical == "boolean":
                 series.astype("boolean")
+            elif canonical == "datetime64[ns]":
+                pd.to_datetime(series, errors="raise")
+            elif canonical == "category":
+                series.astype("category")
             else:
                 series.astype(canonical)
             return True
@@ -751,6 +857,10 @@ class AnalyticsWindow(QMainWindow):
                 converted = series.astype("string")
                 return converted.replace({"True": True, "False": False}).astype("boolean")
             return series.astype("boolean")
+        if canonical == "datetime64[ns]":
+            return pd.to_datetime(series, errors="coerce" if coerce else "raise")
+        if canonical == "category":
+            return series.astype("category")
         return series.astype(canonical)
 
     def _build_feature_page(self):
@@ -1094,6 +1204,7 @@ class AnalyticsWindow(QMainWindow):
                     self.label_combo.setCurrentIndex(index)
 
         self.populate_visualization_controls()
+        self.populate_dtype_controls()
 
     def selected_columns(self):
         """Return selected features, always retaining the chosen label."""
@@ -1131,6 +1242,7 @@ class AnalyticsWindow(QMainWindow):
         self._set_dirty(True)
         self.refresh_import_tables()
         self.populate_visualization_controls()
+        self.populate_dtype_controls()
 
     def apply_selected_preprocessing(self):
         """Apply one existing preprocessing operation to the checked project columns."""
@@ -1207,12 +1319,12 @@ class AnalyticsWindow(QMainWindow):
 
         action_group = QActionGroup(self)
         action_group.setExclusive(True)
-        dtype_choices = ["int64", "float64", "string", "boolean"]
         current_canonical = self._canonical_dtype(current_dtype)
-        choices = [dtype for dtype in dtype_choices if dtype != current_canonical]
 
-        for dtype in choices:
-            action = QAction(f"Change Type to {dtype}", self)
+        for label, dtype in DTYPE_OPTIONS:
+            if dtype == current_canonical:
+                continue
+            action = QAction(f"Change Type to {label}", self)
             action.setCheckable(True)
             action.setChecked(dtype == current_canonical)
             action.triggered.connect(lambda checked, dtype=dtype: self.change_column_type(column_name, dtype))
@@ -1364,7 +1476,8 @@ class AnalyticsWindow(QMainWindow):
     def revert_dtype_conversion(self, columns):
         if self.og_df.empty:
             QMessageBox.warning(self, "No Original Data", "Original dataset is not available to revert data type changes.")
-            return
+            return []
+        changed_columns = []
         for col in columns:
             if col not in self.og_df.columns or col not in self.working_df.columns:
                 continue
@@ -1385,16 +1498,12 @@ class AnalyticsWindow(QMainWindow):
             original_mask = original_series.notna()
             restored.loc[original_mask] = original_series.loc[original_mask]
 
-            if self._can_convert_dtype(restored, original_dtype):
-                try:
-                    self.working_df[col] = self._convert_series_dtype(restored, original_dtype)
-                except Exception as error:
-                    QMessageBox.warning(
-                        self,
-                        "Revert Failed",
-                        f"Could not revert '{col}' to original dtype {original_dtype}:\n\n{error}"
-                    )
-            else:
+            try:
+                # Revert means the exact source dtype, including pandas'
+                # nullable/string variants, rather than only its broad family.
+                self.working_df[col] = restored.astype(original_dtype)
+                changed_columns.append(col)
+            except Exception:
                 result = QMessageBox.question(
                     self,
                     "Revert Data Type",
@@ -1406,14 +1515,18 @@ class AnalyticsWindow(QMainWindow):
                 if result == QMessageBox.StandardButton.Yes:
                     try:
                         self.working_df[col] = self._convert_series_dtype(restored, original_dtype, coerce=True)
+                        changed_columns.append(col)
                     except Exception as error:
                         QMessageBox.warning(
                             self,
                             "Revert Failed",
                             f"Could not coerce '{col}' to {original_dtype}:\n\n{error}"
                         )
-        self._set_dirty(True)
-        self.refresh_import_tables()
+        if changed_columns:
+            self._finish_dtype_change(changed_columns[-1])
+        else:
+            self.populate_dtype_controls()
+        return changed_columns
 
     def revert_transform(self, columns):
         if self.og_df.empty:
