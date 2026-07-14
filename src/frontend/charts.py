@@ -54,7 +54,8 @@ class ChartCanvas(FigureCanvasQTAgg):
             self.show_empty("Open a dataset to visualize it.")
             return
 
-        # Extension point: add new generic chart types to this dispatch.
+        # Extension point: add chart types here and keep CHART_TYPES plus
+        # update_chart_controls in main_window.py synchronized.
         if chart_type == "Histogram":
             self._histogram(df, x_col)
         elif chart_type == "Scatter":

@@ -69,6 +69,8 @@ class WorkerSignals(QObject):
     error = Signal(Exception)
 
 
+# File parsing stays off the GUI thread. The worker returns a complete
+# DataFrame, and only the finished slot updates shared window state.
 class DataLoadWorker(QRunnable):
     def __init__(self, file_path, dataset, columns):
         super().__init__()
@@ -1114,6 +1116,8 @@ class AnalyticsWindow(QMainWindow):
             if self.working_df.empty:
                 self.working_df = self.og_df[columns].copy()
             else:
+                # Retain preprocessing already applied to selected columns;
+                # source data is used only when a column is newly re-selected.
                 existing = [c for c in columns if c in self.working_df.columns]
                 current = self.working_df[existing].copy()
                 missing = [c for c in columns if c not in existing]
@@ -1146,6 +1150,8 @@ class AnalyticsWindow(QMainWindow):
             self.normalize_columns(columns)
 
         if self.project is not None:
+            # Store a reproducibility trail alongside the transformed working
+            # DataFrame; the backend project writer persists this metadata.
             self.project.setdefault("preprocessing", []).append({
                 "operation": method,
                 "columns": list(columns),
@@ -1153,6 +1159,8 @@ class AnalyticsWindow(QMainWindow):
 
     def reset_workflow_state(self):
         """Clear analysis and visualization state when a new dataset/project loads."""
+        # Project references are cleared before asynchronous dataset loading so
+        # stale feature/analysis output cannot leak into the next project.
         self.project = None
         self.feature_df = pd.DataFrame()
         self.analysis_model.set_data(pd.DataFrame())
@@ -1612,6 +1620,8 @@ class AnalyticsWindow(QMainWindow):
 
         try:
             self.project["file_path"] = str(self.file_path) if self.file_path is not None else self.project.get("file_path")
+            # feature_df is persisted separately from raw and working data so
+            # imported/extracted features survive project reloads.
             save_project(
                 self.project,
                 self.og_df.copy(),
@@ -1754,6 +1764,8 @@ class AnalyticsWindow(QMainWindow):
             self.show_error("Feature Extraction Error", error)
             return
 
+        # feature_extract returns a mapping per signal; normalize it into one
+        # table row per signal for preview, export, and project persistence.
         rows = []
         for signal, values in raw_features.items():
             row = {"signal": signal}
@@ -1763,6 +1775,8 @@ class AnalyticsWindow(QMainWindow):
 
         self.feature_df = pd.DataFrame(rows)
         if self.project is not None:
+            # Save the recipe independently from feature_df so users can audit
+            # which source columns and statistics produced the table.
             self.project["feature_extraction"] = {
                 "columns": list(signals),
                 "metrics": list(requested_features),
