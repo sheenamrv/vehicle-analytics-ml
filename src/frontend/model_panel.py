@@ -287,9 +287,9 @@ class SupervisedModelPage(QWidget):
 
     def _delete_selected(self):
         indexes = self.model_table.selectionModel().selectedRows()
-        if indexes:
-            self.delete_requested.emit(self.model_table_model._data.iloc[indexes[0].row()]["name"])
-
+        for index in indexes:
+            name = self.model_table_model._data.iloc[index.row()]["name"]
+            self.delete_requested.emit(name)
     def _test_selected(self):
         names = [
             self.model_table_model._data.iloc[index.row()]["name"]
