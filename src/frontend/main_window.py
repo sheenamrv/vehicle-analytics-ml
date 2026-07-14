@@ -1788,7 +1788,8 @@ class AnalyticsWindow(QMainWindow):
             self.highlight_duplicate_rows()
 
     def impute_columns(self, columns, method="mean"):
-        df = self.working_df if not self.working_df.empty else self.og_df
+        # Keep og_df as the immutable baseline used by the revert actions.
+        df = self.working_df if not self.working_df.empty else self.og_df.copy()
         if df.empty:
             QMessageBox.warning(self, "No Data", "Load a dataset before imputing values.")
             return
@@ -1969,7 +1970,7 @@ class AnalyticsWindow(QMainWindow):
         self.refresh_import_tables()
 
     def standardize_columns(self, columns):
-        df = self.working_df if not self.working_df.empty else self.og_df
+        df = self.working_df if not self.working_df.empty else self.og_df.copy()
         numeric_cols = [col for col in columns if pd.api.types.is_numeric_dtype(df[col])]
         if not numeric_cols:
             QMessageBox.warning(self, "Standardize", "Select numeric columns to standardize.")
@@ -1981,7 +1982,7 @@ class AnalyticsWindow(QMainWindow):
         self.refresh_import_tables()
 
     def normalize_columns(self, columns):
-        df = self.working_df if not self.working_df.empty else self.og_df
+        df = self.working_df if not self.working_df.empty else self.og_df.copy()
         numeric_cols = [col for col in columns if pd.api.types.is_numeric_dtype(df[col])]
         if not numeric_cols:
             QMessageBox.warning(self, "Normalize", "Select numeric columns to normalize.")
@@ -2006,11 +2007,14 @@ class AnalyticsWindow(QMainWindow):
         model = self.preview_table.model()
         selection = self.preview_table.selectionModel()
         selection.clearSelection()
-        for row_index in row_indices:
-            page_start = self.preview_page * self.preview_page_size
-            page_end = page_start + self.preview_page_size
-            if page_start <= row_index < page_end:
-                preview_row = row_index - page_start
+        df = self.working_df if not self.working_df.empty else self.og_df
+        page_start = self.preview_page * self.preview_page_size
+        page_end = page_start + self.preview_page_size
+        selected_labels = set(row_indices)
+        # Preview pages are positional, while cleaned working data retains
+        # source row labels. Match labels within the visible positional slice.
+        for preview_row, row_label in enumerate(df.index[page_start:page_end]):
+            if row_label in selected_labels:
                 index = model.index(preview_row, 0)
                 selection.select(index, QItemSelectionModel.Select | QItemSelectionModel.Rows)
 
