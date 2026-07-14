@@ -2455,6 +2455,26 @@ class AnalyticsWindow(QMainWindow):
     def update_chart_controls(self):
         """Enable only the chart inputs required by the selected chart type."""
         chart_type = self.chart_type_combo.currentText()
+        df = self.working_df if not self.working_df.empty else self.og_df
+        numeric = [str(column) for column in df.select_dtypes(include="number").columns] if not df.empty else []
+        temporal = [str(column) for column in df.select_dtypes(include=["datetime", "datetimetz"]).columns] if not df.empty else []
+        categorical = [str(column) for column in df.columns if str(column) not in numeric and str(column) not in temporal] if not df.empty else []
+        x_choices, y_choices = numeric, numeric
+        if chart_type == "Line":
+            x_choices = numeric + temporal
+        elif chart_type == "Bar Chart":
+            x_choices = categorical
+        elif chart_type == "Grouped Box Plot":
+            x_choices = categorical
+
+        for combo, choices in ((self.chart_x_combo, x_choices), (self.chart_y_combo, y_choices)):
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(choices)
+            if current in choices:
+                combo.setCurrentText(current)
+            combo.blockSignals(False)
         # Extension point: keep this mapping aligned with CHART_TYPES.
         needs_y = chart_type in ("Scatter", "Line", "Bar Chart", "Grouped Box Plot")
         needs_x = chart_type in (
@@ -2476,6 +2496,16 @@ class AnalyticsWindow(QMainWindow):
             self.chart_canvas.show_empty("Open a dataset to visualize it.")
             return
 
+        error = self.visualization_validation_error(
+            df,
+            self.chart_type_combo.currentText(),
+            self.chart_x_combo.currentText(),
+            self.chart_y_combo.currentText(),
+        )
+        if error:
+            QMessageBox.warning(self, "Invalid Visualization", error)
+            return
+
         label = self.chart_label_combo.currentData()
         self.chart_canvas.plot(
             df,
@@ -2495,6 +2525,21 @@ class AnalyticsWindow(QMainWindow):
             if not visualizations or visualizations[-1] != configuration:
                 visualizations.append(configuration)
                 self._set_dirty(True)
+
+    @staticmethod
+    def visualization_validation_error(df, chart_type, x_column, y_column):
+        numeric = lambda column: column in df.columns and pd.api.types.is_numeric_dtype(df[column])
+        if chart_type in ("Histogram", "Box Plot") and not numeric(x_column):
+            return f"{chart_type} requires one numeric primary column."
+        if chart_type == "Scatter" and not (numeric(x_column) and numeric(y_column)):
+            return "Scatter plots require numeric X and Y columns."
+        if chart_type == "Line" and not numeric(y_column):
+            return "Line charts require a numeric Y column."
+        if chart_type == "Bar Chart" and (x_column not in df.columns or not numeric(y_column)):
+            return "Bar charts require a categorical X column and numeric Y column."
+        if chart_type == "Grouped Box Plot" and (x_column not in df.columns or numeric(x_column) or not numeric(y_column)):
+            return "Grouped box plots require a categorical X column and numeric Y column."
+        return None
 
     def numeric_columns(self):
         """Return numeric columns from the active DataFrame for chart defaults."""

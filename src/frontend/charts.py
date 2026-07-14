@@ -17,6 +17,7 @@ Path(os.environ["XDG_CACHE_HOME"]).mkdir(parents=True, exist_ok=True)
 
 import numpy as np
 import pandas as pd
+import seaborn as sns
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
@@ -152,7 +153,7 @@ class ChartCanvas(FigureCanvasQTAgg):
             self.show_empty("Choose a numeric column for the histogram.")
             return
 
-        axis.hist(series.dropna(), bins=24, color="#36b66b", edgecolor="white")
+        sns.histplot(series.dropna(), bins=24, color="#36b66b", edgecolor="white", kde=True, ax=axis)
         axis.axvline(series.mean(), color="#1f7f43", linestyle="--", linewidth=2)
         axis.set_title(f"Histogram: {column}")
         axis.set_xlabel(column)
@@ -172,24 +173,9 @@ class ChartCanvas(FigureCanvasQTAgg):
 
         if label_col in plot_df.columns and plot_df[label_col].nunique() <= 12:
             labels = plot_df[label_col].astype("category")
-            scatter = axis.scatter(
-                plot_df[x_col],
-                plot_df[y_col],
-                c=labels.cat.codes,
-                cmap="viridis",
-                alpha=0.78,
-                s=34,
-            )
-            handles, _ = scatter.legend_elements()
-            axis.legend(
-                handles,
-                labels.cat.categories.astype(str),
-                title=label_col,
-                loc="best",
-                frameon=False,
-            )
+            sns.scatterplot(data=plot_df, x=x_col, y=y_col, hue=label_col, palette="viridis", alpha=0.78, s=48, ax=axis)
         else:
-            axis.scatter(plot_df[x_col], plot_df[y_col], color="#36b66b", alpha=0.78, s=34)
+            sns.scatterplot(data=plot_df, x=x_col, y=y_col, color="#36b66b", alpha=0.78, s=48, ax=axis)
 
         axis.set_title(f"{y_col} vs {x_col}")
         axis.set_xlabel(x_col)
@@ -208,7 +194,7 @@ class ChartCanvas(FigureCanvasQTAgg):
             self.show_empty("The selected columns do not contain plottable values.")
             return
 
-        axis.plot(plot_df[x_col], plot_df[y_col], color="#1f7f43", linewidth=2)
+        sns.lineplot(data=plot_df, x=x_col, y=y_col, color="#1f7f43", linewidth=2, ax=axis)
         axis.set_title(f"{y_col} over {x_col}")
         axis.set_xlabel(x_col)
         axis.set_ylabel(y_col)
@@ -221,13 +207,7 @@ class ChartCanvas(FigureCanvasQTAgg):
             self.show_empty("Choose a numeric column for the box plot.")
             return
 
-        axis.boxplot(
-            series.dropna(),
-            vert=False,
-            patch_artist=True,
-            boxprops={"facecolor": "#ccebd9", "edgecolor": "#1f7f43"},
-            medianprops={"color": "#1f7f43", "linewidth": 2},
-        )
+        sns.boxplot(x=series.dropna(), color="#9ad6af", ax=axis)
         axis.set_title(f"Distribution: {column}")
         axis.set_xlabel(column)
         axis.set_yticks([])
@@ -256,7 +236,7 @@ class ChartCanvas(FigureCanvasQTAgg):
 
         # Keep categorical labels readable; show top groups only.
         values = values.head(20)
-        axis.bar(values.index.astype(str), values.values, color="#36b66b")
+        sns.barplot(x=values.index.astype(str), y=values.values, color="#36b66b", ax=axis)
         axis.set_title(title)
         axis.set_xlabel(category_col)
         axis.set_ylabel(ylabel)
@@ -277,22 +257,8 @@ class ChartCanvas(FigureCanvasQTAgg):
             self.show_empty("The selected columns do not contain plottable values.")
             return
 
-        groups = []
-        labels = []
-        for label, group in plot_df.groupby(group_col, dropna=False):
-            groups.append(group[value_col].to_numpy())
-            labels.append(str(label))
-            # More groups make box labels unreadable in this fixed panel.
-            if len(groups) >= 12:
-                break
-
-        axis.boxplot(
-            groups,
-            labels=labels,
-            patch_artist=True,
-            boxprops={"facecolor": "#ccebd9", "edgecolor": "#1f7f43"},
-            medianprops={"color": "#1f7f43", "linewidth": 2},
-        )
+        top_groups = plot_df[group_col].value_counts().head(12).index
+        sns.boxplot(data=plot_df[plot_df[group_col].isin(top_groups)], x=group_col, y=value_col, color="#9ad6af", ax=axis)
         axis.set_title(f"{value_col} by {group_col}")
         axis.set_xlabel(group_col)
         axis.set_ylabel(value_col)
