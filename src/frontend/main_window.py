@@ -557,6 +557,25 @@ class AnalyticsWindow(QMainWindow):
         self.create_project_button = primary_button("Create Project")
         self.create_project_button.clicked.connect(self.create_project)
         layout.addWidget(self.create_project_button)
+        layout.addWidget(divider())
+
+        layout.addWidget(section_label("PREPROCESSING"))
+        self.preprocessing_method = taller_dropdown(QComboBox())
+        self.preprocessing_method.addItems([
+            "Impute with Mean",
+            "Impute with Median",
+            "Impute with Mode",
+            "Standardize Numeric",
+            "Normalize Numeric",
+        ])
+        layout.addWidget(QLabel("Apply to selected columns"))
+        layout.addWidget(self.preprocessing_method)
+        apply_preprocessing = primary_button("Apply Preprocessing")
+        apply_preprocessing.clicked.connect(self.apply_selected_preprocessing)
+        layout.addWidget(apply_preprocessing)
+        review_quality = secondary_button("Review Data Quality")
+        review_quality.clicked.connect(self.open_quality_dialog)
+        layout.addWidget(review_quality)
         layout.addStretch()
         return panel
 
@@ -1190,6 +1209,7 @@ class AnalyticsWindow(QMainWindow):
             return
 
         self.feature_df = feature_df
+        self._set_dirty(True)
         self.refresh_feature_tables()
         self.on_workflow_tab_changed(1)
 
@@ -1364,7 +1384,7 @@ class AnalyticsWindow(QMainWindow):
             if self.working_df.empty:
                 self.working_df = self.og_df[columns].copy()
             else:
-                # Preserve transformations on columns that remain selected.
+                # Retain preprocessing already applied to selected columns.
                 # Working-frame indices are source-row identities, so restored
                 # columns must be selected with those same indices after rows
                 # have been removed during data-quality cleanup.
@@ -1380,8 +1400,41 @@ class AnalyticsWindow(QMainWindow):
         self.refresh_import_tables()
         self.populate_visualization_controls()
 
+    def apply_selected_preprocessing(self):
+        """Apply one existing preprocessing operation to the checked project columns."""
+        columns = self.column_picker.selected_items()
+        if not columns:
+            QMessageBox.warning(self, "Missing Columns", "Select at least one column before preprocessing.")
+            return
+
+        method = self.preprocessing_method.currentText()
+        applied_columns = []
+        recipe = None
+        if method == "Impute with Mean":
+            applied_columns = self.impute_columns(columns, method="mean")
+            recipe = {"operation": "impute", "strategy": "mean"}
+        elif method == "Impute with Median":
+            applied_columns = self.impute_columns(columns, method="median")
+            recipe = {"operation": "impute", "strategy": "median"}
+        elif method == "Impute with Mode":
+            applied_columns = self.impute_columns(columns, method="mode")
+            recipe = {"operation": "impute", "strategy": "mode"}
+        elif method == "Standardize Numeric":
+            applied_columns = self.standardize_columns(columns)
+            recipe = {"operation": "standardize"}
+        elif method == "Normalize Numeric":
+            applied_columns = self.normalize_columns(columns)
+            recipe = {"operation": "normalize"}
+
+        if self.project is not None and applied_columns and recipe is not None:
+            # Store only effective transformations. This keeps the project
+            # recipe reproducible instead of recording rejected or no-op work.
+            self.project.setdefault("preprocessing", []).append({**recipe, "columns": applied_columns})
+
     def reset_workflow_state(self):
         """Clear analysis and visualization state when a new dataset/project loads."""
+        # Project references are cleared before asynchronous dataset loading so
+        # stale feature/analysis output cannot leak into the next project.
         self.project = None
         self.feature_df = pd.DataFrame()
         self.analysis_model.set_data(pd.DataFrame())
@@ -1792,9 +1845,11 @@ class AnalyticsWindow(QMainWindow):
         df = self.working_df if not self.working_df.empty else self.og_df.copy()
         if df.empty:
             QMessageBox.warning(self, "No Data", "Load a dataset before imputing values.")
-            return
+            return []
 
+        applied_columns = []
         for col in columns:
+            before = df[col].copy()
             if method == "custom":
                 value, ok = QInputDialog.getText(self, "Custom Imputation", f"Value for {col}:")
                 if not ok:
@@ -1859,9 +1914,13 @@ class AnalyticsWindow(QMainWindow):
                     )
                     continue
 
+            if not df[col].equals(before):
+                applied_columns.append(col)
+
         self.working_df = df
         self._set_dirty(True)
         self.refresh_import_tables()
+        return applied_columns
 
     def _parse_custom_impute_value(self, value, dtype):
         try:
@@ -1974,24 +2033,28 @@ class AnalyticsWindow(QMainWindow):
         numeric_cols = [col for col in columns if pd.api.types.is_numeric_dtype(df[col])]
         if not numeric_cols:
             QMessageBox.warning(self, "Standardize", "Select numeric columns to standardize.")
-            return
+            return []
+        before = df[numeric_cols].copy()
         scaler = StandardScaler()
         df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
         self.working_df = df
         self._set_dirty(True)
         self.refresh_import_tables()
+        return [col for col in numeric_cols if not df[col].equals(before[col])]
 
     def normalize_columns(self, columns):
         df = self.working_df if not self.working_df.empty else self.og_df.copy()
         numeric_cols = [col for col in columns if pd.api.types.is_numeric_dtype(df[col])]
         if not numeric_cols:
             QMessageBox.warning(self, "Normalize", "Select numeric columns to normalize.")
-            return
+            return []
+        before = df[numeric_cols].copy()
         scaler = MinMaxScaler()
         df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
         self.working_df = df
         self._set_dirty(True)
         self.refresh_import_tables()
+        return [col for col in numeric_cols if not df[col].equals(before[col])]
 
     def highlight_missing_rows(self):
         df = self.working_df if not self.working_df.empty else self.og_df
@@ -2169,6 +2232,8 @@ class AnalyticsWindow(QMainWindow):
 
         try:
             self.project["file_path"] = str(self.file_path) if self.file_path is not None else self.project.get("file_path")
+            # feature_df is persisted separately from raw and working data so
+            # imported/extracted features survive project reloads.
             save_project(
                 self.project,
                 self.og_df.copy(),
@@ -2311,6 +2376,8 @@ class AnalyticsWindow(QMainWindow):
             self.show_error("Feature Extraction Error", error)
             return
 
+        # feature_extract returns a mapping per signal; normalize it into one
+        # table row per signal for preview, export, and project persistence.
         rows = []
         for signal, values in raw_features.items():
             row = {"signal": signal}
@@ -2319,6 +2386,14 @@ class AnalyticsWindow(QMainWindow):
             rows.append(row)
 
         self.feature_df = pd.DataFrame(rows)
+        if self.project is not None:
+            # Save the recipe independently from feature_df so users can audit
+            # which source columns and statistics produced the table.
+            self.project["feature_extraction"] = {
+                "columns": list(signals),
+                "metrics": list(requested_features),
+            }
+        self._set_dirty(True)
         self.refresh_feature_tables()
         self.on_workflow_tab_changed(1)
 
