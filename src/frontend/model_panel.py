@@ -261,3 +261,127 @@ class SupervisedModelPage(QWidget):
             for index in self.model_table.selectionModel().selectedRows()
         ]
         self.test_requested.emit(names)
+
+
+class SemiSupervisedSidebar(QWidget):
+    """Configure self-training from a saved supervised classifier."""
+
+    train_requested = Signal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._models = []
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 28, 26, 22)
+        layout.setSpacing(9)
+
+        brand = QLabel("Classify & Learn Lab")
+        brand.setObjectName("brand")
+        layout.addWidget(brand)
+        layout.addSpacing(26)
+        layout.addWidget(section_label("SEMI-SUPERVISED MODEL"))
+
+        self.pretrained_model = taller_dropdown(QComboBox())
+        layout.addWidget(QLabel("Starting model"))
+        layout.addWidget(self.pretrained_model)
+        layout.addWidget(divider())
+
+        layout.addWidget(section_label("SELF-TRAINING"))
+        self.threshold = QDoubleSpinBox()
+        self.threshold.setRange(0.05, 0.99)
+        self.threshold.setValue(0.90)
+        self.threshold.setSingleStep(0.05)
+        self.threshold.setDecimals(2)
+        self.max_iterations = QSpinBox()
+        self.max_iterations.setRange(1, 100)
+        self.max_iterations.setValue(10)
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.addRow("Confidence", self.threshold)
+        form.addRow("Max iterations", self.max_iterations)
+        layout.addLayout(form)
+
+        self.train_button = primary_button("Train Self-Training Model")
+        self.train_button.clicked.connect(self._request_training)
+        layout.addWidget(self.train_button)
+        layout.addStretch()
+
+    def set_pretrained_models(self, models):
+        self._models = [
+            model for model in models
+            if model.get("algorithm") in set(MODEL_OPTIONS.values())
+        ]
+        current_name = self.pretrained_model.currentData()
+        self.pretrained_model.blockSignals(True)
+        self.pretrained_model.clear()
+        for model in self._models:
+            self.pretrained_model.addItem(model.get("display_name", "Unnamed model"), model)
+        self.pretrained_model.blockSignals(False)
+        if current_name:
+            index = self.pretrained_model.findData(current_name)
+            if index >= 0:
+                self.pretrained_model.setCurrentIndex(index)
+
+    def _request_training(self):
+        model = self.pretrained_model.currentData()
+        if model is None:
+            return
+        self.train_requested.emit({
+            "pretrained_model": model,
+            "threshold": self.threshold.value(),
+            "max_iter": self.max_iterations.value(),
+        })
+
+    def set_training(self, training):
+        self.train_button.setEnabled(not training)
+        self.pretrained_model.setEnabled(not training)
+        self.train_button.setText("Training..." if training else "Train Self-Training Model")
+
+
+class SemiSupervisedPage(QWidget):
+    """Show the latest self-training evaluation and labelling progress."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.metrics_model = PandasTableModel()
+        self.confusion_model = PandasTableModel()
+        self.progress_model = PandasTableModel()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        layout.addWidget(section_label("SELF-TRAINING RESULTS"))
+
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(True)
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+
+        top = QHBoxLayout()
+        top.setSpacing(16)
+        top.addWidget(data_panel("EVALUATION METRICS", self.metrics_model), 1)
+        top.addWidget(data_panel("CONFUSION MATRIX", self.confusion_model), 2)
+        layout.addLayout(top, 1)
+        layout.addWidget(data_panel("PSEUDO-LABELLING PROGRESS", self.progress_model), 1)
+
+    def set_result(self, result):
+        metrics = pd.DataFrame(
+            [{"metric": key.replace("_", " ").title(), "value": value}
+             for key, value in result["metrics"].items()]
+        )
+        self.metrics_model.set_data(metrics.round(4))
+        self.confusion_model.set_data(pd.DataFrame(result["confusion_matrix"]))
+        self.progress_model.set_data(result["iteration_progress"].round(2))
+
+    def clear(self):
+        self.metrics_model.set_data(pd.DataFrame())
+        self.confusion_model.set_data(pd.DataFrame())
+        self.progress_model.set_data(pd.DataFrame())
+
+    def set_training(self, training):
+        self.progress.setVisible(training)
+        if training:
+            self.progress.setRange(0, 0)
+            self.progress.setFormat("Training self-training model...")
+        else:
+            self.progress.setRange(0, 1)

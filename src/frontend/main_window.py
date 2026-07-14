@@ -45,7 +45,12 @@ from src.data.test_load import get_available_columns, get_datasets, select_col, 
 from src.feature.feature import feature_extract
 from src.frontend.charts import ChartCanvas
 from src.frontend.data_summary import file_summary, missing_summary
-from src.frontend.model_panel import SupervisedModelPage, SupervisedModelSidebar
+from src.frontend.model_panel import (
+    SemiSupervisedPage,
+    SemiSupervisedSidebar,
+    SupervisedModelPage,
+    SupervisedModelSidebar,
+)
 from src.frontend.styles import apply_app_styles
 from src.frontend.table_model import PandasTableModel
 from src.frontend.widgets import (
@@ -64,6 +69,7 @@ from src.frontend.widgets import (
 )
 from src.model.supervised_model import run_supervised_workflow
 from src.model.model_training import evaluate_saved_models
+from src.model.semisupervised_model import run_ssl_workflow
 
 
 class WorkerSignals(QObject):
@@ -131,6 +137,31 @@ class ModelEvaluationWorker(QRunnable):
             self.signals.error.emit(error)
             return
         self.signals.finished.emit(results)
+
+
+class SemiSupervisedTrainingWorker(QRunnable):
+    def __init__(self, train_dataframe, test_dataframe, label_column, options):
+        super().__init__()
+        self.train_dataframe = train_dataframe.copy()
+        self.test_dataframe = test_dataframe.copy()
+        self.label_column = label_column
+        self.options = options
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            result = run_ssl_workflow(
+                train_df=self.train_dataframe,
+                test_df=self.test_dataframe,
+                label=self.label_column,
+                pretrained_model=self.options["pretrained_model"]["model"],
+                threshold=self.options["threshold"],
+                max_iter=self.options["max_iter"],
+            )
+        except Exception as error:
+            self.signals.error.emit(error)
+            return
+        self.signals.finished.emit((self.options, result))
 
 
 class QualityIssueTableModel(QAbstractTableModel):
@@ -428,7 +459,12 @@ class AnalyticsWindow(QMainWindow):
         self.sidebar_stack.addWidget(self._visualization_sidebar())
         self.model_sidebar = SupervisedModelSidebar()
         self.model_sidebar.train_requested.connect(self.train_supervised_model)
-        self.sidebar_stack.addWidget(self.model_sidebar)
+        self.semi_supervised_sidebar = SemiSupervisedSidebar()
+        self.semi_supervised_sidebar.train_requested.connect(self.train_semi_supervised_model)
+        self.model_sidebar_stack = QStackedWidget()
+        self.model_sidebar_stack.addWidget(self.model_sidebar)
+        self.model_sidebar_stack.addWidget(self.semi_supervised_sidebar)
+        self.sidebar_stack.addWidget(self.model_sidebar_stack)
 
         self.on_top_tab_changed(0)
         self.on_workflow_tab_changed(0)
@@ -832,9 +868,25 @@ class AnalyticsWindow(QMainWindow):
         self.main_stack.addWidget(page)
 
     def _build_models_page(self):
-        self.model_page = SupervisedModelPage()
-        self.model_page.delete_requested.connect(self.delete_saved_model)
-        self.model_page.test_requested.connect(self.test_saved_models)
+        self.model_page = QWidget()
+        layout = QVBoxLayout(self.model_page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        self.model_tabs = tab_row(
+            self,
+            ["Supervised", "Semi-Supervised"],
+            self.on_model_tab_changed,
+            compact=True,
+        )
+        layout.addLayout(self.model_tabs["layout"])
+        self.model_pages = QStackedWidget()
+        self.supervised_model_page = SupervisedModelPage()
+        self.supervised_model_page.delete_requested.connect(self.delete_saved_model)
+        self.supervised_model_page.test_requested.connect(self.test_saved_models)
+        self.semi_supervised_model_page = SemiSupervisedPage()
+        self.model_pages.addWidget(self.supervised_model_page)
+        self.model_pages.addWidget(self.semi_supervised_model_page)
+        layout.addWidget(self.model_pages, 1)
         self.main_stack.addWidget(self.model_page)
 
 # ============================================================================
@@ -846,7 +898,7 @@ class AnalyticsWindow(QMainWindow):
             self.top_tabs["buttons"][index].setChecked(True)
             self.workflow_tab_container.setVisible(False)
             self.main_stack.setCurrentWidget(self.model_page)
-            self.sidebar_stack.setCurrentWidget(self.model_sidebar)
+            self.sidebar_stack.setCurrentWidget(self.model_sidebar_stack)
             self.refresh_model_page()
             return
         if index != 0:
@@ -869,6 +921,15 @@ class AnalyticsWindow(QMainWindow):
         if index == 3:
             self.refresh_visualization_summary()
             self.render_visualization()
+
+    def on_model_tab_changed(self, index):
+        self.model_tabs["buttons"][index].setChecked(True)
+        self.model_pages.setCurrentIndex(index)
+        self.model_sidebar_stack.setCurrentIndex(index)
+        if index == 0:
+            self.refresh_model_page()
+        else:
+            self.refresh_semi_supervised_page()
 
     def _set_dirty(self, dirty=True):
         if self._suppress_dirty and dirty:
@@ -1184,9 +1245,10 @@ class AnalyticsWindow(QMainWindow):
         if hasattr(self, "visualization_title"):
             self.visualization_title.setText("PROJECT SUMMARY")
         if hasattr(self, "model_page"):
-            self.model_page.set_models([])
-            self.model_page.metrics_model.set_data(pd.DataFrame())
-            self.model_page.confusion_model.set_data(pd.DataFrame())
+            self.supervised_model_page.set_models([])
+            self.supervised_model_page.metrics_model.set_data(pd.DataFrame())
+            self.supervised_model_page.confusion_model.set_data(pd.DataFrame())
+            self.semi_supervised_model_page.clear()
 
     # ============================================================================
     # Supervised Models
@@ -1194,7 +1256,11 @@ class AnalyticsWindow(QMainWindow):
 
     def refresh_model_page(self):
         """Synchronize the model workspace with the active project's saved models."""
-        self.model_page.set_models(self.project.get("models", []) if self.project else [])
+        self.supervised_model_page.set_models(self.project.get("models", []) if self.project else [])
+
+    def refresh_semi_supervised_page(self):
+        models = self.project.get("models", []) if self.project else []
+        self.semi_supervised_sidebar.set_pretrained_models(models)
 
     def train_supervised_model(self, options):
         """Run the selected backend classifier without blocking the Qt event loop."""
@@ -1220,7 +1286,7 @@ class AnalyticsWindow(QMainWindow):
             options["model_name"] = f"{options['model_type'].replace('_', ' ').title()} {len(self.project.get('models', [])) + 1}"
 
         self.model_sidebar.set_training(True)
-        self.model_page.set_training(True)
+        self.supervised_model_page.set_training(True)
         worker = ModelTrainingWorker(df, label, options)
         worker.signals.finished.connect(self.on_supervised_model_trained)
         worker.signals.error.connect(self.on_supervised_model_error)
@@ -1229,7 +1295,7 @@ class AnalyticsWindow(QMainWindow):
     def on_supervised_model_trained(self, payload):
         options, result = payload
         self.model_sidebar.set_training(False)
-        self.model_page.set_training(False)
+        self.supervised_model_page.set_training(False)
         self.project.setdefault("models", []).append({
             "display_name": options["model_name"],
             "algorithm": options["model_type"],
@@ -1240,7 +1306,7 @@ class AnalyticsWindow(QMainWindow):
         })
         self._set_dirty(True)
         self.refresh_model_page()
-        self.model_page.set_result(result)
+        self.supervised_model_page.set_result(result)
         QMessageBox.information(
             self,
             "Training Complete",
@@ -1249,7 +1315,7 @@ class AnalyticsWindow(QMainWindow):
 
     def on_supervised_model_error(self, error):
         self.model_sidebar.set_training(False)
-        self.model_page.set_training(False)
+        self.supervised_model_page.set_training(False)
         self.show_error("Training Error", error)
 
     def delete_saved_model(self, model_name):
@@ -1319,7 +1385,7 @@ class AnalyticsWindow(QMainWindow):
             if model.get("display_name") in model_names
         ]
         self.model_sidebar.set_training(True)
-        self.model_page.set_training(True)
+        self.supervised_model_page.set_training(True)
         worker = ModelEvaluationWorker(selected_models, test_df, label)
         worker.signals.finished.connect(self.on_models_tested)
         worker.signals.error.connect(self.on_supervised_model_error)
@@ -1327,7 +1393,7 @@ class AnalyticsWindow(QMainWindow):
 
     def on_models_tested(self, results):
         self.model_sidebar.set_training(False)
-        self.model_page.set_training(False)
+        self.supervised_model_page.set_training(False)
         if not results:
             QMessageBox.warning(self, "Test Results", "No model results were returned.")
             return
@@ -1335,9 +1401,100 @@ class AnalyticsWindow(QMainWindow):
             {"model": item["name"], **item["metrics"]}
             for item in results
         ])
-        self.model_page.metrics_model.set_data(comparison.round(4))
-        self.model_page.confusion_model.set_data(pd.DataFrame(results[0]["confusion_matrix"]))
+        self.supervised_model_page.metrics_model.set_data(comparison.round(4))
+        self.supervised_model_page.confusion_model.set_data(pd.DataFrame(results[0]["confusion_matrix"]))
         QMessageBox.information(self, "Testing Complete", f"Tested {len(results)} model(s).")
+
+    def train_semi_supervised_model(self, options):
+        """Run self-training on partially labelled project data and a held-out dataset."""
+        if self.project is None:
+            QMessageBox.warning(self, "No Project", "Create or open a project before training a model.")
+            return
+
+        train_df = self.working_df if not self.working_df.empty else self.og_df
+        label = self.project.get("label_column") or self.label_combo.currentText()
+        if train_df.empty or not label or label not in train_df.columns:
+            QMessageBox.warning(self, "Training Unavailable", "Select a dataset and a valid label column before training.")
+            return
+        if not train_df[label].notna().any():
+            QMessageBox.warning(self, "Training Unavailable", "Self-training needs at least one labelled row in the project dataset.")
+            return
+
+        features = train_df.select_dtypes(include="number").columns.drop(label, errors="ignore").tolist()
+        expected_features = options["pretrained_model"].get("feature_columns", [])
+        if features != expected_features:
+            QMessageBox.warning(
+                self,
+                "Model Compatibility",
+                "Choose a saved model trained with the same numeric feature columns as this project.",
+            )
+            return
+
+        test_df = self._select_evaluation_dataset(label)
+        if test_df is None:
+            return
+
+        self.semi_supervised_sidebar.set_training(True)
+        self.semi_supervised_model_page.set_training(True)
+        worker = SemiSupervisedTrainingWorker(train_df, test_df, label, options)
+        worker.signals.finished.connect(self.on_semi_supervised_model_trained)
+        worker.signals.error.connect(self.on_semi_supervised_model_error)
+        self.thread_pool.start(worker)
+
+    def _select_evaluation_dataset(self, label):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Labelled Evaluation Dataset",
+            str(self.downloads_dir),
+            "Data Files (*.csv *.xlsx *.xls *.mat);;All Files (*.*)",
+        )
+        if not path:
+            return None
+        try:
+            path = Path(path)
+            datasets = get_datasets(path)
+            if not datasets:
+                raise ValueError("No datasets were found in the selected file.")
+            dataset = datasets[0]
+            if len(datasets) > 1:
+                dataset, accepted = QInputDialog.getItem(self, "Select Evaluation Dataset", "Dataset", datasets, 0, False)
+                if not accepted:
+                    return None
+            columns = get_available_columns(path, dataset)
+            if label not in columns:
+                raise ValueError(f"The evaluation dataset must include the '{label}' label column.")
+            return select_col(path, dataset, columns)
+        except Exception as error:
+            self.show_error("Evaluation Dataset Error", error)
+            return None
+
+    def on_semi_supervised_model_trained(self, payload):
+        options, result = payload
+        self.semi_supervised_sidebar.set_training(False)
+        self.semi_supervised_model_page.set_training(False)
+        name = f"Self-Training {len(self.project.get('models', [])) + 1}"
+        self.project.setdefault("models", []).append({
+            "display_name": name,
+            "algorithm": "semi_supervised",
+            "model": result["ssl_model"],
+            "parameters": {
+                "base_model": options["pretrained_model"].get("display_name"),
+                "threshold": options["threshold"],
+                "max_iter": options["max_iter"],
+            },
+            "metrics": result["metrics"],
+            "feature_columns": result["features"],
+        })
+        self._set_dirty(True)
+        self.refresh_model_page()
+        self.refresh_semi_supervised_page()
+        self.semi_supervised_model_page.set_result(result)
+        QMessageBox.information(self, "Training Complete", f"{name} trained successfully.")
+
+    def on_semi_supervised_model_error(self, error):
+        self.semi_supervised_sidebar.set_training(False)
+        self.semi_supervised_model_page.set_training(False)
+        self.show_error("Self-Training Error", error)
 
     def on_preview_header_menu(self, pos):
         header = self.preview_table.horizontalHeader()
