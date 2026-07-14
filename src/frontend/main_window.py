@@ -625,10 +625,13 @@ class AnalyticsWindow(QMainWindow):
 
         self.chart_x_combo = taller_dropdown(QComboBox())
         self.chart_y_combo = taller_dropdown(QComboBox())
+        self.chart_label_combo = taller_dropdown(QComboBox())
         layout.addWidget(QLabel("X / Primary Column"))
         layout.addWidget(self.chart_x_combo)
         layout.addWidget(QLabel("Y Column"))
         layout.addWidget(self.chart_y_combo)
+        layout.addWidget(QLabel("Color / Group By"))
+        layout.addWidget(self.chart_label_combo)
 
         render = primary_button("Render Chart")
         render.clicked.connect(self.render_visualization)
@@ -2425,6 +2428,22 @@ class AnalyticsWindow(QMainWindow):
             combo.addItems([str(col) for col in self.columns])
             combo.blockSignals(False)
 
+        self.chart_label_combo.blockSignals(True)
+        self.chart_label_combo.clear()
+        self.chart_label_combo.addItem("None", "")
+        df = self.working_df if not self.working_df.empty else self.og_df
+        categorical = [
+            str(column) for column in df.columns
+            if not pd.api.types.is_numeric_dtype(df[column])
+            or str(column) == self.label_combo.currentText()
+        ] if not df.empty else []
+        for column in categorical:
+            self.chart_label_combo.addItem(column, column)
+        label_index = self.chart_label_combo.findData(self.label_combo.currentText())
+        if label_index >= 0:
+            self.chart_label_combo.setCurrentIndex(label_index)
+        self.chart_label_combo.blockSignals(False)
+
         numeric_columns = self.numeric_columns()
         if numeric_columns:
             self.chart_x_combo.setCurrentText(numeric_columns[0])
@@ -2448,6 +2467,7 @@ class AnalyticsWindow(QMainWindow):
         )
         self.chart_x_combo.setEnabled(needs_x)
         self.chart_y_combo.setEnabled(needs_y)
+        self.chart_label_combo.setEnabled(chart_type in ("Scatter", "Grouped Box Plot"))
 
     def render_visualization(self):
         """Render the selected generic visualization against the active dataset."""
@@ -2456,13 +2476,25 @@ class AnalyticsWindow(QMainWindow):
             self.chart_canvas.show_empty("Open a dataset to visualize it.")
             return
 
+        label = self.chart_label_combo.currentData()
         self.chart_canvas.plot(
             df,
             self.chart_type_combo.currentText(),
             self.chart_x_combo.currentText(),
             self.chart_y_combo.currentText(),
-            self.label_combo.currentText(),
+            label,
         )
+        if self.project is not None:
+            configuration = {
+                "chart_type": self.chart_type_combo.currentText(),
+                "x_column": self.chart_x_combo.currentText(),
+                "y_column": self.chart_y_combo.currentText(),
+                "group_column": label or None,
+            }
+            visualizations = self.project.setdefault("visualizations", [])
+            if not visualizations or visualizations[-1] != configuration:
+                visualizations.append(configuration)
+                self._set_dirty(True)
 
     def numeric_columns(self):
         """Return numeric columns from the active DataFrame for chart defaults."""
