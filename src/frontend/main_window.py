@@ -965,6 +965,11 @@ class AnalyticsWindow(QMainWindow):
         comparison_layout = QVBoxLayout(comparison_view)
         comparison_layout.setContentsMargins(0, 0, 0, 0)
         comparison_layout.addWidget(section_label("COMPARISON OVERVIEW"))
+        self.comparison_chart = ChartCanvas(
+            "Train at least one model to compare evaluation metrics.",
+            min_height=260,
+        )
+        comparison_layout.addWidget(self.comparison_chart, 2)
         comparison_layout.addWidget(data_panel("METRICS OVERVIEW", self.comparison_model), 1)
         self.results_pages.addWidget(results_view)
         self.results_pages.addWidget(comparison_view)
@@ -1038,6 +1043,7 @@ class AnalyticsWindow(QMainWindow):
         self.results_model.set_data(comparison)
         self.comparison_model.set_data(comparison)
         self.result_details_model.set_data(pd.DataFrame())
+        self.comparison_chart.plot_model_comparison(comparison)
 
     def on_result_selection_changed(self, selected, deselected):
         indexes = self.results_table.selectionModel().selectedRows()

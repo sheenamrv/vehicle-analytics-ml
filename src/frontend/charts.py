@@ -141,6 +141,34 @@ class ChartCanvas(FigureCanvasQTAgg):
         self._style_axis(axis)
         self.draw()
 
+    def plot_model_comparison(self, metrics_df):
+        """Render comparable saved-model classification metrics."""
+        required = {"name", "accuracy", "precision", "recall", "f1"}
+        if metrics_df.empty or not required.issubset(metrics_df.columns):
+            self.show_empty("Train at least one model to compare evaluation metrics.")
+            return
+
+        plot_df = metrics_df[["name", "accuracy", "precision", "recall", "f1"]].melt(
+            id_vars="name",
+            value_vars=["accuracy", "precision", "recall", "f1"],
+            var_name="metric",
+            value_name="score",
+        ).dropna()
+        if plot_df.empty:
+            self.show_empty("No comparable classification metrics are available.")
+            return
+
+        axis = self._single_axis()
+        sns.barplot(data=plot_df, x="name", y="score", hue="metric", palette="Greens", ax=axis)
+        axis.set_title("Model Metrics Comparison")
+        axis.set_xlabel("Model")
+        axis.set_ylabel("Score")
+        axis.set_ylim(0, 1.05)
+        axis.tick_params(axis="x", rotation=25)
+        axis.legend(title="Metric", frameon=False, loc="best")
+        self._style_axis(axis)
+        self.draw()
+
     def _single_axis(self):
         """Reset the figure and return a fresh axis for single-chart canvases."""
         self.figure.clear()
