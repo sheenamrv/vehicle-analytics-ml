@@ -434,6 +434,25 @@ class AnalyticsWindow(QMainWindow):
         self.create_project_button = primary_button("Create Project")
         self.create_project_button.clicked.connect(self.create_project)
         layout.addWidget(self.create_project_button)
+        layout.addWidget(divider())
+
+        layout.addWidget(section_label("PREPROCESSING"))
+        self.preprocessing_method = taller_dropdown(QComboBox())
+        self.preprocessing_method.addItems([
+            "Impute with Mean",
+            "Impute with Median",
+            "Impute with Mode",
+            "Standardize Numeric",
+            "Normalize Numeric",
+        ])
+        layout.addWidget(QLabel("Apply to selected columns"))
+        layout.addWidget(self.preprocessing_method)
+        apply_preprocessing = primary_button("Apply Preprocessing")
+        apply_preprocessing.clicked.connect(self.apply_selected_preprocessing)
+        layout.addWidget(apply_preprocessing)
+        review_quality = secondary_button("Review Data Quality")
+        review_quality.clicked.connect(self.open_quality_dialog)
+        layout.addWidget(review_quality)
         layout.addStretch()
         return panel
 
@@ -920,6 +939,7 @@ class AnalyticsWindow(QMainWindow):
             return
 
         self.feature_df = feature_df
+        self._set_dirty(True)
         self.refresh_feature_tables()
         self.on_workflow_tab_changed(1)
 
@@ -1105,6 +1125,31 @@ class AnalyticsWindow(QMainWindow):
         self._set_dirty(True)
         self.refresh_import_tables()
         self.populate_visualization_controls()
+
+    def apply_selected_preprocessing(self):
+        """Apply one existing preprocessing operation to the checked project columns."""
+        columns = self.column_picker.selected_items()
+        if not columns:
+            QMessageBox.warning(self, "Missing Columns", "Select at least one column before preprocessing.")
+            return
+
+        method = self.preprocessing_method.currentText()
+        if method == "Impute with Mean":
+            self.impute_columns(columns, method="mean")
+        elif method == "Impute with Median":
+            self.impute_columns(columns, method="median")
+        elif method == "Impute with Mode":
+            self.impute_columns(columns, method="mode")
+        elif method == "Standardize Numeric":
+            self.standardize_columns(columns)
+        elif method == "Normalize Numeric":
+            self.normalize_columns(columns)
+
+        if self.project is not None:
+            self.project.setdefault("preprocessing", []).append({
+                "operation": method,
+                "columns": list(columns),
+            })
 
     def reset_workflow_state(self):
         """Clear analysis and visualization state when a new dataset/project loads."""
@@ -1717,6 +1762,12 @@ class AnalyticsWindow(QMainWindow):
             rows.append(row)
 
         self.feature_df = pd.DataFrame(rows)
+        if self.project is not None:
+            self.project["feature_extraction"] = {
+                "columns": list(signals),
+                "metrics": list(requested_features),
+            }
+        self._set_dirty(True)
         self.refresh_feature_tables()
         self.on_workflow_tab_changed(1)
 
