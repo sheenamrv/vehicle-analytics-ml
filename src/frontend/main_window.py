@@ -1486,9 +1486,16 @@ class AnalyticsWindow(QMainWindow):
             )
             return
 
-        if not options["model_name"]:
-            options["model_name"] = f"{options['model_type'].replace('_', ' ').title()} {len(self.project.get('models', [])) + 1}"
-
+        existing_names = {m.get("display_name") for m in self.project.get("models", [])}
+        base_name = options.get("model_name", "").strip()
+        if not base_name:
+            base_name = f"{options['model_type'].replace('_', ' ').title()}"
+        name = base_name
+        counter = 1
+        while name in existing_names:
+            counter += 1
+            name = f"{base_name} {counter}"
+        options["model_name"] = name
         self.model_sidebar.set_training(True)
         self.supervised_model_page.set_training(True)
         worker = ModelTrainingWorker(df, label, options)
