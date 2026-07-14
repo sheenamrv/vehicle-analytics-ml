@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import numpy as np
 import pandas as pd
@@ -20,7 +21,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QDialog,
     QPushButton,
-    QInputDialog,
     QTableView,
 )
 from PySide6.QtCore import (
@@ -46,6 +46,15 @@ from src.data.test_load import get_available_columns, get_datasets, select_col, 
 from src.feature.feature import feature_extract
 from src.frontend.charts import ChartCanvas
 from src.frontend.data_summary import file_summary, missing_summary
+from src.frontend.model_panel import (
+    MODEL_OPTIONS,
+    SemiSupervisedPage,
+    SemiSupervisedSidebar,
+    SupervisedModelPage,
+    SupervisedModelSidebar,
+    UnsupervisedPage,
+    UnsupervisedSidebar,
+)
 from src.frontend.styles import apply_app_styles
 from src.frontend.table_model import PandasTableModel
 from src.frontend.widgets import (
@@ -62,6 +71,10 @@ from src.frontend.widgets import (
     table_view,
     taller_dropdown,
 )
+from src.model.supervised_model import run_supervised_workflow
+from src.model.model_training import evaluate_saved_models
+from src.model.semisupervised_model import run_ssl_workflow
+from src.model.unsupervised_model import run_unsupervised_workflow
 
 
 class WorkerSignals(QObject):
@@ -69,8 +82,8 @@ class WorkerSignals(QObject):
     error = Signal(Exception)
 
 
-# File parsing stays off the GUI thread. The worker returns a complete
-# DataFrame, and only the finished slot updates shared window state.
+# Backend workflows can be CPU-heavy. Workers receive DataFrame copies so the
+# GUI thread cannot mutate training input while a job is running.
 class DataLoadWorker(QRunnable):
     def __init__(self, file_path, dataset, columns):
         super().__init__()
@@ -89,6 +102,94 @@ class DataLoadWorker(QRunnable):
             return
 
         self.signals.finished.emit(df)
+
+
+class ModelTrainingWorker(QRunnable):
+    def __init__(self, dataframe, label_column, options):
+        super().__init__()
+        self.dataframe = dataframe.copy()
+        self.label_column = label_column
+        self.options = options
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            result = run_supervised_workflow(
+                df=self.dataframe,
+                label_col=self.label_column,
+                model_type=self.options["model_type"],
+                parameters=self.options["parameters"],
+                test_size=self.options["test_size"],
+                random_state=self.options["random_state"],
+                stratify=self.options["stratify"],
+            )
+        except Exception as error:
+            self.signals.error.emit(error)
+            return
+        self.signals.finished.emit((self.options, result))
+
+
+class ModelEvaluationWorker(QRunnable):
+    def __init__(self, models, dataframe, label_column):
+        super().__init__()
+        self.models = models
+        self.dataframe = dataframe.copy()
+        self.label_column = label_column
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            results = evaluate_saved_models(self.models, self.dataframe, self.label_column)
+        except Exception as error:
+            self.signals.error.emit(error)
+            return
+        self.signals.finished.emit(results)
+
+
+class SemiSupervisedTrainingWorker(QRunnable):
+    def __init__(self, train_dataframe, test_dataframe, label_column, options):
+        super().__init__()
+        self.train_dataframe = train_dataframe.copy()
+        self.test_dataframe = test_dataframe.copy()
+        self.label_column = label_column
+        self.options = options
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            result = run_ssl_workflow(
+                train_df=self.train_dataframe,
+                test_df=self.test_dataframe,
+                label=self.label_column,
+                pretrained_model=self.options["pretrained_model"]["model"],
+                threshold=self.options["threshold"],
+                max_iter=self.options["max_iter"],
+            )
+        except Exception as error:
+            self.signals.error.emit(error)
+            return
+        self.signals.finished.emit((self.options, result))
+
+
+class UnsupervisedTrainingWorker(QRunnable):
+    def __init__(self, dataframe, label_column, options):
+        super().__init__()
+        self.dataframe = dataframe.copy()
+        self.label_column = label_column
+        self.options = options
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            result = run_unsupervised_workflow(
+                df=self.dataframe,
+                label=self.label_column,
+                **self.options,
+            )
+        except Exception as error:
+            self.signals.error.emit(error)
+            return
+        self.signals.finished.emit((self.options, result))
 
 
 class QualityIssueTableModel(QAbstractTableModel):
@@ -366,7 +467,9 @@ class AnalyticsWindow(QMainWindow):
             self.on_workflow_tab_changed,
             compact=True,
         )
-        content_layout.addLayout(self.workflow_tabs["layout"])
+        self.workflow_tab_container = QWidget()
+        self.workflow_tab_container.setLayout(self.workflow_tabs["layout"])
+        content_layout.addWidget(self.workflow_tab_container)
 
         self.main_stack = QStackedWidget()
         content_layout.addWidget(self.main_stack, 1)
@@ -376,11 +479,29 @@ class AnalyticsWindow(QMainWindow):
         self._build_feature_page()
         self._build_analysis_page()
         self._build_visualization_page()
+        self._build_models_page()
+        self._build_results_page()
 
         self.sidebar_stack.addWidget(self._import_sidebar())
         self.sidebar_stack.addWidget(self._feature_sidebar())
         self.sidebar_stack.addWidget(self._analysis_sidebar())
         self.sidebar_stack.addWidget(self._visualization_sidebar())
+        self.model_sidebar = SupervisedModelSidebar()
+        self.model_sidebar.train_requested.connect(self.train_supervised_model)
+        self.model_sidebar.save_configuration_requested.connect(self.save_model_configuration)
+        self.model_sidebar.load_configuration_requested.connect(self.load_model_configuration)
+        self.semi_supervised_sidebar = SemiSupervisedSidebar()
+        self.semi_supervised_sidebar.train_requested.connect(self.train_semi_supervised_model)
+        self.unsupervised_sidebar = UnsupervisedSidebar()
+        self.unsupervised_sidebar.run_requested.connect(self.run_unsupervised_model)
+        self.model_sidebar_stack = QStackedWidget()
+        # Keep this order aligned with model_tabs and model_pages. A tab change
+        # uses the same index to switch all three model-workspace surfaces.
+        self.model_sidebar_stack.addWidget(self.model_sidebar)
+        self.model_sidebar_stack.addWidget(self.semi_supervised_sidebar)
+        self.model_sidebar_stack.addWidget(self.unsupervised_sidebar)
+        self.sidebar_stack.addWidget(self.model_sidebar_stack)
+        self.sidebar_stack.addWidget(self._results_sidebar())
 
         self.on_top_tab_changed(0)
         self.on_workflow_tab_changed(0)
@@ -527,10 +648,13 @@ class AnalyticsWindow(QMainWindow):
 
         self.chart_x_combo = taller_dropdown(QComboBox())
         self.chart_y_combo = taller_dropdown(QComboBox())
+        self.chart_label_combo = taller_dropdown(QComboBox())
         layout.addWidget(QLabel("X / Primary Column"))
         layout.addWidget(self.chart_x_combo)
         layout.addWidget(QLabel("Y Column"))
         layout.addWidget(self.chart_y_combo)
+        layout.addWidget(QLabel("Color / Group By"))
+        layout.addWidget(self.chart_label_combo)
 
         render = primary_button("Render Chart")
         render.clicked.connect(self.render_visualization)
@@ -540,6 +664,19 @@ class AnalyticsWindow(QMainWindow):
         refresh = primary_button("Refresh Summary")
         refresh.clicked.connect(self.refresh_visualization_summary)
         layout.addWidget(refresh)
+        layout.addStretch()
+        return panel
+
+    def _results_sidebar(self):
+        panel = sidebar_base()
+        layout = panel.layout()
+        layout.addWidget(section_label("RESULTS"))
+        refresh = primary_button("Refresh Results")
+        refresh.clicked.connect(self.refresh_results_page)
+        layout.addWidget(refresh)
+        export = secondary_button("Export Comparison")
+        export.clicked.connect(self.export_results_comparison)
+        layout.addWidget(export)
         layout.addStretch()
         return panel
 
@@ -802,11 +939,85 @@ class AnalyticsWindow(QMainWindow):
         layout.addWidget(self.visualization_table, 1)
         self.main_stack.addWidget(page)
 
+    def _build_models_page(self):
+        self.model_page = QWidget()
+        layout = QVBoxLayout(self.model_page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        self.model_tabs = tab_row(
+            self,
+            ["Supervised", "Semi-Supervised", "Unsupervised"],
+            self.on_model_tab_changed,
+            compact=True,
+        )
+        layout.addLayout(self.model_tabs["layout"])
+        self.model_pages = QStackedWidget()
+        self.supervised_model_page = SupervisedModelPage()
+        self.supervised_model_page.delete_requested.connect(self.delete_saved_model)
+        self.supervised_model_page.test_requested.connect(self.test_saved_models)
+        self.semi_supervised_model_page = SemiSupervisedPage()
+        self.unsupervised_model_page = UnsupervisedPage()
+        self.model_pages.addWidget(self.supervised_model_page)
+        self.model_pages.addWidget(self.semi_supervised_model_page)
+        self.model_pages.addWidget(self.unsupervised_model_page)
+        layout.addWidget(self.model_pages, 1)
+        self.main_stack.addWidget(self.model_page)
+
+    def _build_results_page(self):
+        self.results_page = QWidget()
+        layout = QVBoxLayout(self.results_page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        self.results_tabs = tab_row(self, ["Results", "Comparisons"], self.on_results_tab_changed, compact=True)
+        layout.addLayout(self.results_tabs["layout"])
+        self.results_pages = QStackedWidget()
+        self.results_model = PandasTableModel()
+        self.result_details_model = PandasTableModel()
+        self.comparison_model = PandasTableModel()
+
+        results_view = QWidget()
+        results_layout = QVBoxLayout(results_view)
+        results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.addWidget(section_label("TRAINED MODELS"))
+        self.results_table = table_view(self.results_model)
+        self.results_table.selectionModel().selectionChanged.connect(self.on_result_selection_changed)
+        results_layout.addWidget(self.results_table, 2)
+        results_layout.addWidget(data_panel("TRAINING INFO", self.result_details_model), 1)
+
+        comparison_view = QWidget()
+        comparison_layout = QVBoxLayout(comparison_view)
+        comparison_layout.setContentsMargins(0, 0, 0, 0)
+        comparison_layout.addWidget(section_label("COMPARISON OVERVIEW"))
+        self.comparison_chart = ChartCanvas(
+            "Train at least one model to compare evaluation metrics.",
+            min_height=260,
+        )
+        comparison_layout.addWidget(self.comparison_chart, 2)
+        comparison_layout.addWidget(data_panel("METRICS OVERVIEW", self.comparison_model), 1)
+        self.results_pages.addWidget(results_view)
+        self.results_pages.addWidget(comparison_view)
+        layout.addWidget(self.results_pages, 1)
+        self.main_stack.addWidget(self.results_page)
+
 # ============================================================================
 # Navigation & Tab Management
 # ============================================================================
 
     def on_top_tab_changed(self, index):
+        if index == 1:
+            self.top_tabs["buttons"][index].setChecked(True)
+            self.workflow_tab_container.setVisible(False)
+            self.main_stack.setCurrentWidget(self.model_page)
+            self.sidebar_stack.setCurrentWidget(self.model_sidebar_stack)
+            self.refresh_model_page()
+            return
+        if index == 2:
+            self.top_tabs["buttons"][index].setChecked(True)
+            self.workflow_tab_container.setVisible(False)
+            self.main_stack.setCurrentWidget(self.results_page)
+            self.sidebar_stack.setCurrentIndex(5)
+            self.refresh_results_page()
+            return
         if index != 0:
             QMessageBox.information(
                 self,
@@ -816,6 +1027,8 @@ class AnalyticsWindow(QMainWindow):
             self.top_tabs["buttons"][0].setChecked(True)
             return
         self.top_tabs["buttons"][index].setChecked(True)
+        self.workflow_tab_container.setVisible(True)
+        self.on_workflow_tab_changed(self.workflow_tabs["group"].checkedId())
 
     def on_workflow_tab_changed(self, index):
         """Switch the visible sidebar/page pair for the selected workflow tab."""
@@ -825,6 +1038,61 @@ class AnalyticsWindow(QMainWindow):
         if index == 3:
             self.refresh_visualization_summary()
             self.render_visualization()
+
+    def on_model_tab_changed(self, index):
+        self.model_tabs["buttons"][index].setChecked(True)
+        self.model_pages.setCurrentIndex(index)
+        self.model_sidebar_stack.setCurrentIndex(index)
+        if index == 0:
+            self.refresh_model_page()
+        elif index == 1:
+            self.refresh_semi_supervised_page()
+
+    def on_results_tab_changed(self, index):
+        self.results_tabs["buttons"][index].setChecked(True)
+        self.results_pages.setCurrentIndex(index)
+
+    def refresh_results_page(self):
+        # Results are a read-only projection of project model metadata. Estimator
+        # objects stay in the project and never enter the table model.
+        models = self.project.get("models", []) if self.project else []
+        rows = [{
+            "name": model.get("display_name", ""),
+            "algorithm": model.get("algorithm", ""),
+            "accuracy": model.get("metrics", {}).get("accuracy"),
+            "precision": model.get("metrics", {}).get("precision"),
+            "recall": model.get("metrics", {}).get("recall"),
+            "f1": model.get("metrics", {}).get("f1"),
+        } for model in models]
+        comparison = pd.DataFrame(rows, columns=["name", "algorithm", "accuracy", "precision", "recall", "f1"])
+        self.results_model.set_data(comparison)
+        self.comparison_model.set_data(comparison)
+        self.result_details_model.set_data(pd.DataFrame())
+        self.comparison_chart.plot_model_comparison(comparison)
+
+    def on_result_selection_changed(self, selected, deselected):
+        indexes = self.results_table.selectionModel().selectedRows()
+        if not indexes or not self.project:
+            return
+        name = self.results_model._data.iloc[indexes[0].row()]["name"]
+        model = next((item for item in self.project.get("models", []) if item.get("display_name") == name), {})
+        details = [("algorithm", model.get("algorithm", "")), ("features", ", ".join(model.get("feature_columns", [])))]
+        details.extend((f"parameter: {key}", value) for key, value in model.get("parameters", {}).items())
+        self.result_details_model.set_data(pd.DataFrame(details, columns=["field", "value"]))
+
+    def export_results_comparison(self):
+        if self.comparison_model._data.empty:
+            QMessageBox.warning(self, "No Results", "There are no saved model results to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export Model Comparison", str(self.downloads_dir / "model_results.csv"), "CSV Files (*.csv)")
+        if not path:
+            return
+        try:
+            self.comparison_model._data.to_csv(path, index=False)
+        except Exception as error:
+            self.show_error("Export Error", error)
+            return
+        QMessageBox.information(self, "Export Complete", f"Saved {path}")
 
     def _set_dirty(self, dirty=True):
         if self._suppress_dirty and dirty:
@@ -1177,6 +1445,343 @@ class AnalyticsWindow(QMainWindow):
             self.analysis_title.setText("ANALYSIS PREVIEW")
         if hasattr(self, "visualization_title"):
             self.visualization_title.setText("PROJECT SUMMARY")
+        if hasattr(self, "model_page"):
+            self.supervised_model_page.set_models([])
+            self.supervised_model_page.metrics_model.set_data(pd.DataFrame())
+            self.supervised_model_page.confusion_model.set_data(pd.DataFrame())
+            self.semi_supervised_model_page.clear()
+            self.unsupervised_model_page.clear()
+
+    # ============================================================================
+    # Supervised Models
+    # ============================================================================
+
+    def refresh_model_page(self):
+        """Synchronize the model workspace with the active project's saved models."""
+        # set_models extracts display metadata only; serialized estimators remain
+        # owned by project persistence in src.data.process.
+        self.supervised_model_page.set_models(self.project.get("models", []) if self.project else [])
+
+    def refresh_semi_supervised_page(self):
+        models = self.project.get("models", []) if self.project else []
+        self.semi_supervised_sidebar.set_pretrained_models(models)
+
+    def train_supervised_model(self, options):
+        """Run the selected backend classifier without blocking the Qt event loop."""
+        if self.project is None:
+            QMessageBox.warning(
+                self,
+                "No Project",
+                "Create or open a project before training a model.",
+            )
+            return
+
+        df = self.working_df if not self.working_df.empty else self.og_df
+        label = self.project.get("label_column") or self.label_combo.currentText()
+        if df.empty or not label or label not in df.columns:
+            QMessageBox.warning(
+                self,
+                "Training Unavailable",
+                "Select a dataset and a valid label column before training.",
+            )
+            return
+
+        existing_names = {m.get("display_name") for m in self.project.get("models", [])}
+        base_name = options.get("model_name", "").strip()
+        if not base_name:
+            base_name = f"{options['model_type'].replace('_', ' ').title()}"
+        name = base_name
+        counter = 1
+        while name in existing_names:
+            counter += 1
+            name = f"{base_name} {counter}"
+        options["model_name"] = name
+        self.model_sidebar.set_training(True)
+        self.supervised_model_page.set_training(True)
+        worker = ModelTrainingWorker(df, label, options)
+        worker.signals.finished.connect(self.on_supervised_model_trained)
+        worker.signals.error.connect(self.on_supervised_model_error)
+        self.thread_pool.start(worker)
+
+    def save_model_configuration(self, configuration):
+        path, _ = QFileDialog.getSaveFileName(self, "Save Model Configuration", str(self.downloads_dir / "model_configuration.json"), "JSON Files (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as file:
+                json.dump(configuration, file, indent=2)
+        except Exception as error:
+            self.show_error("Configuration Error", error)
+
+    def load_model_configuration(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load Model Configuration", str(self.downloads_dir), "JSON Files (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as file:
+                configuration = json.load(file)
+            if configuration.get("model_type") not in MODEL_OPTIONS.values():
+                raise ValueError("This file does not contain a supported supervised model configuration.")
+            self.model_sidebar.set_configuration(configuration)
+        except Exception as error:
+            self.show_error("Configuration Error", error)
+
+    def on_supervised_model_trained(self, payload):
+        options, result = payload
+        self.model_sidebar.set_training(False)
+        self.supervised_model_page.set_training(False)
+        self.project.setdefault("models", []).append({
+            "display_name": options["model_name"],
+            "algorithm": options["model_type"],
+            "model": result["model"],
+            "parameters": options["parameters"],
+            "metrics": result["metrics"],
+            "feature_columns": result["features"],
+        })
+        self._set_dirty(True)
+        self.refresh_model_page()
+        self.supervised_model_page.set_result(result)
+        QMessageBox.information(
+            self,
+            "Training Complete",
+            f"{options['model_name']} trained successfully.",
+        )
+
+    def on_supervised_model_error(self, error):
+        self.model_sidebar.set_training(False)
+        self.supervised_model_page.set_training(False)
+        self.show_error("Training Error", error)
+
+    def delete_saved_model(self, model_name):
+        if self.project is None:
+            return
+        result = QMessageBox.question(
+            self,
+            "Delete Model",
+            f"Delete '{model_name}' from this project?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+        self.project["models"] = [
+            model for model in self.project.get("models", [])
+            if model.get("display_name") != model_name
+        ]
+        self._set_dirty(True)
+        self.refresh_model_page()
+
+    def test_saved_models(self, model_names):
+        """Evaluate selected project models against a user-selected labelled dataset."""
+        if not self.project or not model_names:
+            QMessageBox.warning(self, "No Models Selected", "Select at least one saved model to test.")
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Test Dataset",
+            str(self.downloads_dir),
+            "Data Files (*.csv *.xlsx *.xls *.mat);;All Files (*.*)",
+        )
+        if not path:
+            return
+
+        try:
+            datasets = get_datasets(Path(path))
+            if not datasets:
+                raise ValueError("No datasets were found in the selected file.")
+            dataset = datasets[0]
+            if len(datasets) > 1:
+                dataset, accepted = QInputDialog.getItem(
+                    self, "Select Test Dataset", "Dataset", datasets, 0, False,
+                )
+                if not accepted:
+                    return
+            columns = get_available_columns(Path(path), dataset)
+            label, accepted = QInputDialog.getItem(
+                self,
+                "Select Test Label",
+                "Label column",
+                [str(column) for column in columns],
+                max(0, columns.index(self.project.get("label_column")))
+                if self.project.get("label_column") in columns else 0,
+                False,
+            )
+            if not accepted:
+                return
+            test_df = select_col(Path(path), dataset, columns)
+        except Exception as error:
+            self.show_error("Test Dataset Error", error)
+            return
+
+        selected_models = [
+            model for model in self.project.get("models", [])
+            if model.get("display_name") in model_names
+        ]
+        self.model_sidebar.set_training(True)
+        self.supervised_model_page.set_training(True)
+        worker = ModelEvaluationWorker(selected_models, test_df, label)
+        worker.signals.finished.connect(self.on_models_tested)
+        worker.signals.error.connect(self.on_supervised_model_error)
+        self.thread_pool.start(worker)
+
+    def on_models_tested(self, results):
+        self.model_sidebar.set_training(False)
+        self.supervised_model_page.set_training(False)
+        if not results:
+            QMessageBox.warning(self, "Test Results", "No model results were returned.")
+            return
+        comparison = pd.DataFrame([
+            {"model": item["name"], **item["metrics"]}
+            for item in results
+        ])
+        self.supervised_model_page.metrics_model.set_data(comparison.round(4))
+        self.supervised_model_page.confusion_model.set_data(pd.DataFrame(results[0]["confusion_matrix"]))
+        QMessageBox.information(self, "Testing Complete", f"Tested {len(results)} model(s).")
+
+    def train_semi_supervised_model(self, options):
+        """Run self-training on partially labelled project data and a held-out dataset."""
+        if self.project is None:
+            QMessageBox.warning(self, "No Project", "Create or open a project before training a model.")
+            return
+
+        train_df = self.working_df if not self.working_df.empty else self.og_df
+        label = self.project.get("label_column") or self.label_combo.currentText()
+        if train_df.empty or not label or label not in train_df.columns:
+            QMessageBox.warning(self, "Training Unavailable", "Select a dataset and a valid label column before training.")
+            return
+        if not train_df[label].notna().any():
+            QMessageBox.warning(self, "Training Unavailable", "Self-training needs at least one labelled row in the project dataset.")
+            return
+
+        features = train_df.select_dtypes(include="number").columns.drop(label, errors="ignore").tolist()
+        expected_features = options["pretrained_model"].get("feature_columns", [])
+        # SelfTrainingClassifier clones the saved estimator, so its incoming
+        # feature order must exactly match the estimator's training contract.
+        if features != expected_features:
+            QMessageBox.warning(
+                self,
+                "Model Compatibility",
+                "Choose a saved model trained with the same numeric feature columns as this project.",
+            )
+            return
+
+        test_df = self._select_evaluation_dataset(label)
+        if test_df is None:
+            return
+
+        self.semi_supervised_sidebar.set_training(True)
+        self.semi_supervised_model_page.set_training(True)
+        worker = SemiSupervisedTrainingWorker(train_df, test_df, label, options)
+        worker.signals.finished.connect(self.on_semi_supervised_model_trained)
+        worker.signals.error.connect(self.on_semi_supervised_model_error)
+        self.thread_pool.start(worker)
+
+    def _select_evaluation_dataset(self, label):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Labelled Evaluation Dataset",
+            str(self.downloads_dir),
+            "Data Files (*.csv *.xlsx *.xls *.mat);;All Files (*.*)",
+        )
+        if not path:
+            return None
+        try:
+            path = Path(path)
+            datasets = get_datasets(path)
+            if not datasets:
+                raise ValueError("No datasets were found in the selected file.")
+            dataset = datasets[0]
+            if len(datasets) > 1:
+                dataset, accepted = QInputDialog.getItem(self, "Select Evaluation Dataset", "Dataset", datasets, 0, False)
+                if not accepted:
+                    return None
+            columns = get_available_columns(path, dataset)
+            if label not in columns:
+                raise ValueError(f"The evaluation dataset must include the '{label}' label column.")
+            return select_col(path, dataset, columns)
+        except Exception as error:
+            self.show_error("Evaluation Dataset Error", error)
+            return None
+
+    def on_semi_supervised_model_trained(self, payload):
+        options, result = payload
+        self.semi_supervised_sidebar.set_training(False)
+        self.semi_supervised_model_page.set_training(False)
+        existing_names = {m.get("display_name") for m in self.project.get("models", [])}
+        base_name = "Self-Training"
+        counter = 1
+        name = f"{base_name} {counter}"
+        while name in existing_names:
+            counter += 1
+            name = f"{base_name} {counter}"
+        self.project.setdefault("models", []).append({
+            "display_name": name,
+            "algorithm": "semi_supervised",
+            "model": result["ssl_model"],
+            "parameters": {
+                "base_model": options["pretrained_model"].get("display_name"),
+                "threshold": options["threshold"],
+                "max_iter": options["max_iter"],
+            },
+            "metrics": result["metrics"],
+            "feature_columns": result["features"],
+        })
+        self._set_dirty(True)
+        self.refresh_model_page()
+        self.refresh_semi_supervised_page()
+        self.semi_supervised_model_page.set_result(result)
+        QMessageBox.information(self, "Training Complete", f"{name} trained successfully.")
+
+    def on_semi_supervised_model_error(self, error):
+        self.semi_supervised_sidebar.set_training(False)
+        self.semi_supervised_model_page.set_training(False)
+        self.show_error("Self-Training Error", error)
+
+    def run_unsupervised_model(self, options):
+        """Cluster the active dataset without requiring a labelled target column."""
+        if self.project is None:
+            QMessageBox.warning(self, "No Project", "Create or open a project before running clustering.")
+            return
+
+        df = self.working_df if not self.working_df.empty else self.og_df
+        if df.empty:
+            QMessageBox.warning(self, "Clustering Unavailable", "Open a dataset with numeric features before running clustering.")
+            return
+        label = self.project.get("label_column") or self.label_combo.currentText()
+        numeric_features = df.select_dtypes(include="number").columns.drop(label, errors="ignore").tolist()
+        if len(numeric_features) < 2:
+            QMessageBox.warning(
+                self,
+                "Clustering Unavailable",
+                "Clustering needs at least two numeric feature columns in the active dataset.",
+            )
+            return
+
+        self.unsupervised_sidebar.set_running(True)
+        self.unsupervised_model_page.set_running(True)
+        worker = UnsupervisedTrainingWorker(df, label, options)
+        worker.signals.finished.connect(self.on_unsupervised_model_finished)
+        worker.signals.error.connect(self.on_unsupervised_model_error)
+        self.thread_pool.start(worker)
+
+    def on_unsupervised_model_finished(self, payload):
+        options, result = payload
+        self.unsupervised_sidebar.set_running(False)
+        self.unsupervised_model_page.set_running(False)
+        # Cluster runs are exploratory results, not classifiers; do not append
+        # them to project["models"], which assumes predict/evaluate semantics.
+        self.unsupervised_model_page.set_result(result)
+        QMessageBox.information(
+            self,
+            "Clustering Complete",
+            f"{options['method'].replace('_', ' ').title()} clustering finished successfully.",
+        )
+
+    def on_unsupervised_model_error(self, error):
+        self.unsupervised_sidebar.set_running(False)
+        self.unsupervised_model_page.set_running(False)
+        self.show_error("Clustering Error", error)
 
     def on_preview_header_menu(self, pos):
         header = self.preview_table.horizontalHeader()
@@ -1937,6 +2542,22 @@ class AnalyticsWindow(QMainWindow):
             combo.addItems([str(col) for col in self.columns])
             combo.blockSignals(False)
 
+        self.chart_label_combo.blockSignals(True)
+        self.chart_label_combo.clear()
+        self.chart_label_combo.addItem("None", "")
+        df = self.working_df if not self.working_df.empty else self.og_df
+        categorical = [
+            str(column) for column in df.columns
+            if not pd.api.types.is_numeric_dtype(df[column])
+            or str(column) == self.label_combo.currentText()
+        ] if not df.empty else []
+        for column in categorical:
+            self.chart_label_combo.addItem(column, column)
+        label_index = self.chart_label_combo.findData(self.label_combo.currentText())
+        if label_index >= 0:
+            self.chart_label_combo.setCurrentIndex(label_index)
+        self.chart_label_combo.blockSignals(False)
+
         numeric_columns = self.numeric_columns()
         if numeric_columns:
             self.chart_x_combo.setCurrentText(numeric_columns[0])
@@ -1948,6 +2569,28 @@ class AnalyticsWindow(QMainWindow):
     def update_chart_controls(self):
         """Enable only the chart inputs required by the selected chart type."""
         chart_type = self.chart_type_combo.currentText()
+        # Keep these choices synchronized with visualization_validation_error;
+        # filtering improves UX while validation remains the safety boundary.
+        df = self.working_df if not self.working_df.empty else self.og_df
+        numeric = [str(column) for column in df.select_dtypes(include="number").columns] if not df.empty else []
+        temporal = [str(column) for column in df.select_dtypes(include=["datetime", "datetimetz"]).columns] if not df.empty else []
+        categorical = [str(column) for column in df.columns if str(column) not in numeric and str(column) not in temporal] if not df.empty else []
+        x_choices, y_choices = numeric, numeric
+        if chart_type == "Line":
+            x_choices = numeric + temporal
+        elif chart_type == "Bar Chart":
+            x_choices = categorical
+        elif chart_type == "Grouped Box Plot":
+            x_choices = categorical
+
+        for combo, choices in ((self.chart_x_combo, x_choices), (self.chart_y_combo, y_choices)):
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(choices)
+            if current in choices:
+                combo.setCurrentText(current)
+            combo.blockSignals(False)
         # Extension point: keep this mapping aligned with CHART_TYPES.
         needs_y = chart_type in ("Scatter", "Line", "Bar Chart", "Grouped Box Plot")
         needs_x = chart_type in (
@@ -1960,6 +2603,7 @@ class AnalyticsWindow(QMainWindow):
         )
         self.chart_x_combo.setEnabled(needs_x)
         self.chart_y_combo.setEnabled(needs_y)
+        self.chart_label_combo.setEnabled(chart_type == "Scatter")
 
     def render_visualization(self):
         """Render the selected generic visualization against the active dataset."""
@@ -1968,13 +2612,57 @@ class AnalyticsWindow(QMainWindow):
             self.chart_canvas.show_empty("Open a dataset to visualize it.")
             return
 
+        error = self.visualization_validation_error(
+            df,
+            self.chart_type_combo.currentText(),
+            self.chart_x_combo.currentText(),
+            self.chart_y_combo.currentText(),
+        )
+        if error:
+            QMessageBox.warning(self, "Invalid Visualization", error)
+            return
+
+        label = self.chart_label_combo.currentData()
         self.chart_canvas.plot(
             df,
             self.chart_type_combo.currentText(),
             self.chart_x_combo.currentText(),
             self.chart_y_combo.currentText(),
-            self.label_combo.currentText(),
+            label,
         )
+        if self.project is not None:
+            configuration = {
+                "chart_type": self.chart_type_combo.currentText(),
+                "x_column": self.chart_x_combo.currentText(),
+                "y_column": self.chart_y_combo.currentText(),
+                "group_column": label or None,
+            }
+            visualizations = self.project.setdefault("visualizations", [])
+            if not visualizations or visualizations[-1] != configuration:
+                visualizations.append(configuration)
+                self._set_dirty(True)
+
+    @staticmethod
+    def visualization_validation_error(df, chart_type, x_column, y_column):
+        # This method is intentionally UI-independent so chart rules can be
+        # unit-tested without rendering a Matplotlib canvas.
+        numeric = lambda column: column in df.columns and pd.api.types.is_numeric_dtype(df[column])
+        if chart_type in ("Histogram", "Box Plot") and not numeric(x_column):
+            return f"{chart_type} requires one numeric primary column."
+        if chart_type == "Scatter" and not (numeric(x_column) and numeric(y_column)):
+            return "Scatter plots require numeric X and Y columns."
+        if chart_type == "Line":
+            if x_column not in df.columns:
+                return "Line charts require an X column."
+            if not (numeric(x_column) or pd.api.types.is_datetime64_any_dtype(df[x_column])):
+                return "Line charts require a numeric or datetime X column."
+            if not numeric(y_column):
+                return "Line charts require a numeric Y column."
+        if chart_type == "Bar Chart" and (x_column not in df.columns or not numeric(y_column)):
+            return "Bar charts require a categorical X column and numeric Y column."
+        if chart_type == "Grouped Box Plot" and (x_column not in df.columns or numeric(x_column) or not numeric(y_column)):
+            return "Grouped box plots require a categorical X column and numeric Y column."
+        return None
 
     def numeric_columns(self):
         """Return numeric columns from the active DataFrame for chart defaults."""
