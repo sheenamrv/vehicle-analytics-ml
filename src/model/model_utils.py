@@ -25,7 +25,7 @@ def get_categorical_feature_columns(df, label_col=None):
     if label_col and label_col in features:
         features.remove(label_col)
     return features
-
+# do not alter
 # Prepare features for modeling (fill numeric missing values, categorical columns are one-hot encoded)
 def prepare_training_features(df, features, fill_method="median", fill_value=None):
   
@@ -63,7 +63,7 @@ def prepare_training_features(df, features, fill_method="median", fill_value=Non
         X = pd.get_dummies(X, columns=list(categorical_cols), dummy_na=False)
 
     return X
-
+# do not alter
 #  Prepare X and y for training
 def prepare_training_data(df, label_col, features=None, fill_method="median", fill_value=None):
     valid, message = validate_dataset(df, label_col)
@@ -92,6 +92,12 @@ def scale_features(X, scaler=None):
     scaler = scaler or StandardScaler()
     X_scaled = scaler.fit_transform(X)
     return X_scaled, scaler
+
+def get_common_training_config():
+    return None
+
+def merge_training_config():
+    return None
 
 
 # Old functions

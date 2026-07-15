@@ -26,7 +26,7 @@ def split_train_test(X, y, test_size=0.3, random_state=42, stratify=False):
         stratify=stratify_values,
     )
 
-
+# do not alter
 def fit_model(model, X, y=None):
     if y is None:
         model.fit(X)
@@ -34,11 +34,11 @@ def fit_model(model, X, y=None):
         model.fit(X, y)
     return model
 
-
+# do not alter
 def predict_model(model, X):
     return model.predict(X)
 
-
+# do not alter
 def fit_predict_model(model, X):
     if hasattr(model, "fit_predict"):
         return model.fit_predict(X)
@@ -49,7 +49,7 @@ def fit_predict_model(model, X):
 
     return predict_model(model, X)
 
-
+#do not alter
 def train_test_classifier(
     model,
     X,
@@ -116,6 +116,13 @@ def evaluate_saved_models(models, df, label_col, fill_method="median", fill_valu
         })
 
     return results
+
+def train_queue():
+    return None
+
+# use process pool executor
+def train_parallel():
+    return None
 
 
 # Old functions
@@ -197,3 +204,4 @@ def display_test_results(results):
         for r in results:
             print(f"\n{r['name']}")
             print(r["predictions"][:20])
+

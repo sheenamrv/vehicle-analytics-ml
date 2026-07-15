@@ -18,6 +18,10 @@ def add_model(project, model, model_name, algorithm, parameters, metrics, featur
         "feature_columns" : list(feature_column)
     })
 
+def add_model_queue():
+    return None
+
+
 def list_models(project):
     
     if not project.get("models"):
@@ -32,6 +36,9 @@ def list_models(project):
 def delete_model(project, display_name):
     
     project["models"] = [model for model in project.get("models", []) if model["display_name"] != display_name]
+
+def delete_model_queue():
+    return None
 
 def edit_model(project):
     
@@ -64,6 +71,29 @@ def edit_model(project):
             else:
                 model["parameters"][key] = value
             
+
+def edit_model_queue():
+    return None
+
+
+def clear_training_queue():
+    return None
+
+
+def get_training_queue():
+    return None
+
+def enable_queue_model():
+    return None
+
+
+def disable_queue_model():
+    return None
+
+
+def reorder_queue():
+    return None
+
 
 def show_model_details(project):
     

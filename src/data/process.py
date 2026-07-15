@@ -163,6 +163,13 @@ def load_project(icp_path):
 
             project = json.load(f)
 
+        project.setdefault("added_models", [])
+        project.setdefault("model_queue", [])
+        for added in project.get("added_models", []):
+            added.setdefault("trained", False)
+            added.setdefault("externally_added", False)
+            added.setdefault("editable_external", True)
+
         for model_info in project.get("models", []):
             
             model_path = (temp_dir/model_info["model_file"])

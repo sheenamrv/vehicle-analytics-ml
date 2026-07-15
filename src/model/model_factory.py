@@ -5,6 +5,8 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 from sklearn.tree import DecisionTreeClassifier
 
+from src.model.model_controller import MODEL_CATALOG
+
 
 SUPPORTED_SUPERVISED_MODELS = {
     "svm",
@@ -20,6 +22,35 @@ SUPPORTED_CLUSTERING_MODELS = {
     "hierarchical",
 }
 
+SUPPORTED_MODELS = {
+
+    "supervised":[
+
+        "svm",
+
+        "knn",
+
+        ...
+
+    ],
+
+    "unsupervised":[
+
+        "kmeans",
+
+        ...
+
+    ],
+
+    "semi_supervised":[
+
+        "self_training"
+
+    ]
+
+}
+
+# do not alter
 # Build supervised model
 def build_model(model_type, parameters=None, random_state=42):
     parameters = parameters or {}
@@ -58,7 +89,7 @@ def build_model(model_type, parameters=None, random_state=42):
         )
 
     raise ValueError(f"Unsupported supervised model_type: {model_type}")
-
+# do not alter
 # Build unsupervised model
 def build_clusterer(method, parameters=None, random_state=42):
     parameters = parameters or {}
@@ -83,3 +114,17 @@ def build_clusterer(method, parameters=None, random_state=42):
         )
 
     raise ValueError(f"Unsupported clustering method: {method}")
+
+def get_supported_models():
+    return {
+        category: list(definitions.keys())
+        for category, definitions in MODEL_CATALOG.items()
+    }
+
+def get_model_category():
+    categories = {}
+    for category, definitions in MODEL_CATALOG.items():
+        for algorithm in definitions.keys():
+            categories[algorithm] = category
+    return categories
+

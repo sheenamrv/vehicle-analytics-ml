@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import joblib
 
 import numpy as np
 import pandas as pd
@@ -33,7 +34,14 @@ from PySide6.QtCore import (
     QModelIndex,
     QItemSelectionModel,
 )
+from sklearn.cluster import AgglomerativeClustering, DBSCAN, KMeans
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.semi_supervised import SelfTrainingClassifier
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
 
 from src.analysis.analysis import (
     correlation_analysis,
@@ -46,14 +54,9 @@ from src.data.test_load import get_available_columns, get_datasets, select_col, 
 from src.feature.feature import feature_extract
 from src.frontend.charts import ChartCanvas
 from src.frontend.data_summary import file_summary, missing_summary
-from src.frontend.model_panel import (
-    MODEL_OPTIONS,
-    SemiSupervisedPage,
-    SemiSupervisedSidebar,
-    SupervisedModelPage,
-    SupervisedModelSidebar,
-    UnsupervisedPage,
-    UnsupervisedSidebar,
+from src.frontend.unified_model_panel import (
+    UnifiedModelPage,
+    UnifiedModelSidebar,
 )
 from src.frontend.styles import apply_app_styles
 from src.frontend.table_model import PandasTableModel
@@ -75,6 +78,7 @@ from src.model.supervised_model import run_supervised_workflow
 from src.model.model_training import evaluate_saved_models
 from src.model.semisupervised_model import run_ssl_workflow
 from src.model.unsupervised_model import run_unsupervised_workflow
+from src.model.model_controller import ModelController
 
 
 class WorkerSignals(QObject):
@@ -190,6 +194,96 @@ class UnsupervisedTrainingWorker(QRunnable):
             self.signals.error.emit(error)
             return
         self.signals.finished.emit((self.options, result))
+
+
+class UnifiedModelTrainingWorker(QRunnable):
+    def __init__(self, dataframe, label_column, added_model_entry, saved_models):
+        super().__init__()
+        self.dataframe = dataframe.copy()
+        self.label_column = label_column
+        self.added_model_entry = dict(added_model_entry)
+        self.saved_models = list(saved_models)
+        self.signals = WorkerSignals()
+
+    def run(self):
+        try:
+            category = self.added_model_entry["category"]
+            algorithm = self.added_model_entry["algorithm"]
+            common = self.added_model_entry.get("common_parameters", {})
+            parameters = ModelController.build_training_parameters(self.added_model_entry)
+
+            if category == "supervised":
+                result = run_supervised_workflow(
+                    df=self.dataframe,
+                    label_col=self.label_column,
+                    model_type=algorithm,
+                    parameters=parameters,
+                    test_size=float(common.get("test_size", 0.3)),
+                    random_state=int(common.get("random_state", 42)),
+                    stratify=bool(common.get("stratify", False)),
+                )
+                payload = {
+                    "name": self.added_model_entry["name"],
+                    "category": category,
+                    "algorithm": algorithm,
+                    "result": result,
+                    "trained_model": result["model"],
+                    "metrics": result.get("metrics", {}),
+                    "feature_columns": result.get("features", []),
+                    "parameters": parameters,
+                }
+            elif category == "semi_supervised":
+                base_name = parameters.get("base_model_name", "")
+                base_model_info = next(
+                    (model for model in self.saved_models if model.get("display_name") == base_name),
+                    None,
+                )
+                if base_model_info is None:
+                    raise ValueError(
+                        "Semi-supervised model requires required parameter 'base_model_name' matching a trained model."
+                    )
+                result = run_ssl_workflow(
+                    train_df=self.dataframe,
+                    test_df=self.dataframe,
+                    label=self.label_column,
+                    pretrained_model=base_model_info["model"],
+                    threshold=float(parameters.get("threshold", 0.9)),
+                    max_iter=int(parameters.get("max_iter", 10)),
+                    verbose=bool(common.get("verbose", False)),
+                )
+                payload = {
+                    "name": self.added_model_entry["name"],
+                    "category": category,
+                    "algorithm": algorithm,
+                    "result": result,
+                    "trained_model": result["ssl_model"],
+                    "metrics": result.get("metrics", {}),
+                    "feature_columns": result.get("features", []),
+                    "parameters": parameters,
+                }
+            else:
+                result = run_unsupervised_workflow(
+                    df=self.dataframe,
+                    method=algorithm,
+                    label=self.label_column,
+                    random_state=int(common.get("random_state", 42)),
+                    **parameters,
+                )
+                payload = {
+                    "name": self.added_model_entry["name"],
+                    "category": category,
+                    "algorithm": algorithm,
+                    "result": result,
+                    "trained_model": result["model"],
+                    "metrics": result.get("metrics", {}),
+                    "feature_columns": result.get("features", []),
+                    "parameters": parameters,
+                }
+        except Exception as error:
+            self.signals.error.emit(error)
+            return
+
+        self.signals.finished.emit(payload)
 
 
 class QualityIssueTableModel(QAbstractTableModel):
@@ -486,21 +580,10 @@ class AnalyticsWindow(QMainWindow):
         self.sidebar_stack.addWidget(self._feature_sidebar())
         self.sidebar_stack.addWidget(self._analysis_sidebar())
         self.sidebar_stack.addWidget(self._visualization_sidebar())
-        self.model_sidebar = SupervisedModelSidebar()
-        self.model_sidebar.train_requested.connect(self.train_supervised_model)
-        self.model_sidebar.save_configuration_requested.connect(self.save_model_configuration)
-        self.model_sidebar.load_configuration_requested.connect(self.load_model_configuration)
-        self.semi_supervised_sidebar = SemiSupervisedSidebar()
-        self.semi_supervised_sidebar.train_requested.connect(self.train_semi_supervised_model)
-        self.unsupervised_sidebar = UnsupervisedSidebar()
-        self.unsupervised_sidebar.run_requested.connect(self.run_unsupervised_model)
-        self.model_sidebar_stack = QStackedWidget()
-        # Keep this order aligned with model_tabs and model_pages. A tab change
-        # uses the same index to switch all three model-workspace surfaces.
-        self.model_sidebar_stack.addWidget(self.model_sidebar)
-        self.model_sidebar_stack.addWidget(self.semi_supervised_sidebar)
-        self.model_sidebar_stack.addWidget(self.unsupervised_sidebar)
-        self.sidebar_stack.addWidget(self.model_sidebar_stack)
+        self.model_sidebar = UnifiedModelSidebar()
+        self.model_sidebar.add_model_requested.connect(self.add_or_update_model_definition)
+        self.model_sidebar.import_external_requested.connect(self.import_external_model)
+        self.sidebar_stack.addWidget(self.model_sidebar)
         self.sidebar_stack.addWidget(self._results_sidebar())
 
         self.on_top_tab_changed(0)
@@ -944,23 +1027,13 @@ class AnalyticsWindow(QMainWindow):
         layout = QVBoxLayout(self.model_page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
-        self.model_tabs = tab_row(
-            self,
-            ["Supervised", "Semi-Supervised", "Unsupervised"],
-            self.on_model_tab_changed,
-            compact=True,
-        )
-        layout.addLayout(self.model_tabs["layout"])
-        self.model_pages = QStackedWidget()
-        self.supervised_model_page = SupervisedModelPage()
-        self.supervised_model_page.delete_requested.connect(self.delete_saved_model)
-        self.supervised_model_page.test_requested.connect(self.test_saved_models)
-        self.semi_supervised_model_page = SemiSupervisedPage()
-        self.unsupervised_model_page = UnsupervisedPage()
-        self.model_pages.addWidget(self.supervised_model_page)
-        self.model_pages.addWidget(self.semi_supervised_model_page)
-        self.model_pages.addWidget(self.unsupervised_model_page)
-        layout.addWidget(self.model_pages, 1)
+        self.unified_model_page = UnifiedModelPage()
+        self.unified_model_page.model_action_requested.connect(self.on_added_model_action)
+        self.unified_model_page.queue_add_requested.connect(self.add_models_to_queue)
+        self.unified_model_page.queue_remove_requested.connect(self.remove_models_from_queue)
+        self.unified_model_page.queue_reordered.connect(self.on_queue_reordered)
+        self.unified_model_page.train_queue_requested.connect(self.train_model_queue)
+        layout.addWidget(self.unified_model_page, 1)
         self.main_stack.addWidget(self.model_page)
 
     def _build_results_page(self):
@@ -1008,7 +1081,7 @@ class AnalyticsWindow(QMainWindow):
             self.top_tabs["buttons"][index].setChecked(True)
             self.workflow_tab_container.setVisible(False)
             self.main_stack.setCurrentWidget(self.model_page)
-            self.sidebar_stack.setCurrentWidget(self.model_sidebar_stack)
+            self.sidebar_stack.setCurrentWidget(self.model_sidebar)
             self.refresh_model_page()
             return
         if index == 2:
@@ -1040,13 +1113,8 @@ class AnalyticsWindow(QMainWindow):
             self.render_visualization()
 
     def on_model_tab_changed(self, index):
-        self.model_tabs["buttons"][index].setChecked(True)
-        self.model_pages.setCurrentIndex(index)
-        self.model_sidebar_stack.setCurrentIndex(index)
-        if index == 0:
-            self.refresh_model_page()
-        elif index == 1:
-            self.refresh_semi_supervised_page()
+        del index
+        self.refresh_model_page()
 
     def on_results_tab_changed(self, index):
         self.results_tabs["buttons"][index].setChecked(True)
@@ -1397,6 +1465,17 @@ class AnalyticsWindow(QMainWindow):
                 self.working_df = current[columns].copy()
 
         self._set_dirty(True)
+
+        # Keep project label metadata and added-model labels synchronized with
+        # the Data & Features selection.
+        if self.project is not None:
+            new_label = self.label_combo.currentText()
+            if self.project.get("label_column") != new_label:
+                self.project["label_column"] = new_label
+                for added in self.project.get("added_models", []):
+                    added["label"] = new_label
+                self.model_sidebar.set_project_label(new_label)
+
         self.refresh_import_tables()
         self.populate_visualization_controls()
 
@@ -1446,342 +1525,468 @@ class AnalyticsWindow(QMainWindow):
         if hasattr(self, "visualization_title"):
             self.visualization_title.setText("PROJECT SUMMARY")
         if hasattr(self, "model_page"):
-            self.supervised_model_page.set_models([])
-            self.supervised_model_page.metrics_model.set_data(pd.DataFrame())
-            self.supervised_model_page.confusion_model.set_data(pd.DataFrame())
-            self.semi_supervised_model_page.clear()
-            self.unsupervised_model_page.clear()
+            self.unified_model_page.set_added_models([])
+            self.unified_model_page.set_queue([])
 
     # ============================================================================
     # Supervised Models
     # ============================================================================
 
     def refresh_model_page(self):
-        """Synchronize the model workspace with the active project's saved models."""
-        # set_models extracts display metadata only; serialized estimators remain
-        # owned by project persistence in src.data.process.
-        self.supervised_model_page.set_models(self.project.get("models", []) if self.project else [])
-
-    def refresh_semi_supervised_page(self):
-        models = self.project.get("models", []) if self.project else []
-        self.semi_supervised_sidebar.set_pretrained_models(models)
-
-    def train_supervised_model(self, options):
-        """Run the selected backend classifier without blocking the Qt event loop."""
+        """Synchronize Added Models and Queue using project-backed state."""
         if self.project is None:
-            QMessageBox.warning(
-                self,
-                "No Project",
-                "Create or open a project before training a model.",
+            self.unified_model_page.set_added_models([])
+            self.unified_model_page.set_queue([])
+            self.model_sidebar.set_project_label("")
+            return
+
+        ModelController.ensure_project_state(self.project)
+        self.model_sidebar.set_project_label(self.project.get("label_column", ""))
+        self.unified_model_page.set_added_models(self.project.get("added_models", []))
+        self.unified_model_page.set_queue(ModelController.queue_rows(self.project))
+
+    def add_or_update_model_definition(self, payload):
+        if self.project is None:
+            QMessageBox.warning(self, "No Project", "Create or open a project before adding models.")
+            return
+
+        ModelController.ensure_project_state(self.project)
+        added_models = self.project.setdefault("added_models", [])
+        existing_names = [item.get("name", "") for item in added_models]
+
+        original_name = payload.get("original_name")
+        desired_name = payload.get("name", "").strip()
+        if not desired_name:
+            QMessageBox.warning(self, "Invalid Name", "Enter a model name.")
+            return
+
+        if original_name:
+            existing = ModelController.find_added_model(self.project, original_name)
+            if existing is None:
+                QMessageBox.warning(self, "Model Missing", f"Could not find '{original_name}' to edit.")
+                return
+
+            if desired_name != original_name:
+                without_original = [name for name in existing_names if name != original_name]
+                desired_name = ModelController.unique_name(desired_name, without_original)
+
+            existing.update({
+                "name": desired_name,
+                "category": payload.get("category", "supervised"),
+                "algorithm": payload.get("algorithm", "svm"),
+                "label": self.project.get("label_column", ""),
+                "common_parameters": payload.get("common_parameters", {}),
+                "required_parameters": payload.get("required_parameters", {}),
+                "advanced_parameters": payload.get("advanced_parameters", {}),
+                "trained": False,
+                "externally_added": existing.get("externally_added", False),
+                "editable_external": existing.get("editable_external", True),
+            })
+
+            self.project["models"] = [
+                model for model in self.project.get("models", [])
+                if model.get("display_name") not in {original_name, desired_name}
+            ]
+
+            queue = self.project.setdefault("model_queue", [])
+            self.project["model_queue"] = [desired_name if name == original_name else name for name in queue]
+        else:
+            unique_name = ModelController.unique_name(desired_name, existing_names)
+            entry = ModelController.create_added_model_entry(
+                name=unique_name,
+                category=payload.get("category", "supervised"),
+                algorithm=payload.get("algorithm", "svm"),
+                label=self.project.get("label_column", ""),
+                common_parameters=payload.get("common_parameters", {}),
+                required_parameters=payload.get("required_parameters", {}),
+                advanced_parameters=payload.get("advanced_parameters", {}),
             )
+            entry["externally_added"] = False
+            entry["editable_external"] = True
+            added_models.append(entry)
+
+        self._set_dirty(True)
+        self.model_sidebar.reset_form()
+        self.refresh_model_page()
+
+    def on_added_model_action(self, action, name):
+        if self.project is None:
             return
 
-        df = self.working_df if not self.working_df.empty else self.og_df
-        label = self.project.get("label_column") or self.label_combo.currentText()
-        if df.empty or not label or label not in df.columns:
-            QMessageBox.warning(
-                self,
-                "Training Unavailable",
-                "Select a dataset and a valid label column before training.",
+        entry = ModelController.find_added_model(self.project, name)
+        if entry is None:
+            QMessageBox.warning(self, "Model Missing", f"Could not find '{name}'.")
+            return
+
+        if action == "inspect":
+            saved = next((model for model in self.project.get("models", []) if model.get("display_name") == name), None)
+            columns = entry.get("feature_columns", [])
+            if not columns and saved:
+                columns = saved.get("feature_columns", [])
+            if not columns:
+                columns = self.project.get("selected_columns", [])
+
+            common_text = "\n".join([f"{k}: {v}" for k, v in entry.get("common_parameters", {}).items()]) or "None"
+            required_text = "\n".join([f"{k}: {v}" for k, v in entry.get("required_parameters", {}).items()]) or "None"
+            advanced_text = "\n".join([f"{k}: {v}" for k, v in entry.get("advanced_parameters", {}).items()]) or "None"
+            inspect_text = (
+                f"Name: {entry.get('name', '')}\n"
+                f"Category: {entry.get('category', '')}\n"
+                f"Algorithm: {entry.get('algorithm', '')}\n"
+                f"Label: {entry.get('label', '')}\n"
+                f"Trained: {'Yes' if entry.get('trained') else 'No'}\n"
+                f"Added Externally: {'Yes' if entry.get('externally_added') else 'No'}\n\n"
+                f"Columns:\n{', '.join(columns) if columns else 'None'}\n\n"
+                f"Common Parameters:\n{common_text}\n\n"
+                f"Required Parameters:\n{required_text}\n\n"
+                f"Advanced Parameters:\n{advanced_text}"
             )
+            QMessageBox.information(self, "Model Inspect", inspect_text)
             return
 
-        existing_names = {m.get("display_name") for m in self.project.get("models", [])}
-        base_name = options.get("model_name", "").strip()
-        if not base_name:
-            base_name = f"{options['model_type'].replace('_', ' ').title()}"
-        name = base_name
-        counter = 1
-        while name in existing_names:
-            counter += 1
-            name = f"{base_name} {counter}"
-        options["model_name"] = name
-        self.model_sidebar.set_training(True)
-        self.supervised_model_page.set_training(True)
-        worker = ModelTrainingWorker(df, label, options)
-        worker.signals.finished.connect(self.on_supervised_model_trained)
-        worker.signals.error.connect(self.on_supervised_model_error)
-        self.thread_pool.start(worker)
-
-    def save_model_configuration(self, configuration):
-        path, _ = QFileDialog.getSaveFileName(self, "Save Model Configuration", str(self.downloads_dir / "model_configuration.json"), "JSON Files (*.json)")
-        if not path:
+        if action == "edit":
+            if entry.get("externally_added") and not entry.get("editable_external", False):
+                QMessageBox.warning(
+                    self,
+                    "External Model",
+                    "This model was added externally and cannot be edited for this dataset.",
+                )
+                return
+            if entry.get("trained"):
+                proceed = QMessageBox.question(
+                    self,
+                    "Edit Trained Model",
+                    "Editing this model will mark it as not trained. Continue?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if proceed != QMessageBox.StandardButton.Yes:
+                    return
+            self.model_sidebar.load_for_edit(entry)
             return
-        try:
-            with open(path, "w", encoding="utf-8") as file:
-                json.dump(configuration, file, indent=2)
-        except Exception as error:
-            self.show_error("Configuration Error", error)
 
-    def load_model_configuration(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Load Model Configuration", str(self.downloads_dir), "JSON Files (*.json)")
-        if not path:
+        if action == "duplicate":
+            existing_names = [item.get("name", "") for item in self.project.get("added_models", [])]
+            duplicate = ModelController.duplicate_entry(entry, existing_names)
+            self.project.setdefault("added_models", []).append(duplicate)
+            self._set_dirty(True)
+            self.refresh_model_page()
             return
-        try:
-            with open(path, encoding="utf-8") as file:
-                configuration = json.load(file)
-            if configuration.get("model_type") not in MODEL_OPTIONS.values():
-                raise ValueError("This file does not contain a supported supervised model configuration.")
-            self.model_sidebar.set_configuration(configuration)
-        except Exception as error:
-            self.show_error("Configuration Error", error)
 
-    def on_supervised_model_trained(self, payload):
-        options, result = payload
-        self.model_sidebar.set_training(False)
-        self.supervised_model_page.set_training(False)
-        self.project.setdefault("models", []).append({
-            "display_name": options["model_name"],
-            "algorithm": options["model_type"],
-            "model": result["model"],
-            "parameters": options["parameters"],
-            "metrics": result["metrics"],
-            "feature_columns": result["features"],
-        })
+        if action == "delete":
+            confirm = QMessageBox.question(
+                self,
+                "Delete Model",
+                f"Delete '{name}' from Added Models?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+            self.project["added_models"] = [item for item in self.project.get("added_models", []) if item.get("name") != name]
+            self.project["model_queue"] = [item for item in self.project.get("model_queue", []) if item != name]
+            self.project["models"] = [model for model in self.project.get("models", []) if model.get("display_name") != name]
+            self._set_dirty(True)
+            self.refresh_model_page()
+            return
+
+        if action == "export_json":
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export Model Config",
+                str(self.downloads_dir / f"{name}.json"),
+                "JSON Files (*.json)",
+            )
+            if not path:
+                return
+            try:
+                with open(path, "w", encoding="utf-8") as file:
+                    json.dump(entry, file, indent=2)
+            except Exception as error:
+                self.show_error("Export Error", error)
+            return
+
+        if action == "export_pkl":
+            if not entry.get("trained"):
+                QMessageBox.warning(self, "Not Trained", "Model must be trained before exporting PKL.")
+                return
+            saved = next((model for model in self.project.get("models", []) if model.get("display_name") == name), None)
+            if saved is None or "model" not in saved:
+                QMessageBox.warning(self, "Model Missing", "Trained model artifact was not found.")
+                return
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export Trained Model",
+                str(self.downloads_dir / f"{name}.pkl"),
+                "Pickle Files (*.pkl)",
+            )
+            if not path:
+                return
+            try:
+                joblib.dump(saved["model"], path)
+            except Exception as error:
+                self.show_error("Export Error", error)
+
+    def add_models_to_queue(self, names):
+        if self.project is None or not names:
+            return
+        ModelController.ensure_project_state(self.project)
+        queue = self.project.setdefault("model_queue", [])
+        skipped_trained = []
+        for name in names:
+            added = ModelController.find_added_model(self.project, name)
+            if added and added.get("trained"):
+                skipped_trained.append(name)
+                continue
+            if name not in queue:
+                queue.append(name)
+        if skipped_trained:
+            QMessageBox.information(
+                self,
+                "Queue Update",
+                "These models were skipped because they are already trained:\n"
+                + "\n".join(skipped_trained),
+            )
         self._set_dirty(True)
         self.refresh_model_page()
-        self.supervised_model_page.set_result(result)
-        QMessageBox.information(
-            self,
-            "Training Complete",
-            f"{options['model_name']} trained successfully.",
-        )
 
-    def on_supervised_model_error(self, error):
-        self.model_sidebar.set_training(False)
-        self.supervised_model_page.set_training(False)
-        self.show_error("Training Error", error)
+    def remove_models_from_queue(self, names):
+        if self.project is None or not names:
+            return
+        self.project["model_queue"] = [name for name in self.project.get("model_queue", []) if name not in set(names)]
+        self._set_dirty(True)
+        self.refresh_model_page()
 
-    def delete_saved_model(self, model_name):
+    def on_queue_reordered(self, ordered_names):
         if self.project is None:
             return
-        result = QMessageBox.question(
+
+        current_queue = list(self.project.get("model_queue", []))
+        proposed_queue = [str(name) for name in ordered_names if name]
+
+        # Ignore malformed reorder payloads so queue items are never dropped by
+        # a widget drag/drop edge case.
+        if not proposed_queue:
+            return
+        if len(proposed_queue) != len(current_queue):
+            return
+        if set(proposed_queue) != set(current_queue):
+            return
+
+        self.project["model_queue"] = proposed_queue
+        self._set_dirty(True)
+        self.refresh_model_page()
+
+    def train_model_queue(self):
+        if self.project is None:
+            QMessageBox.warning(self, "No Project", "Create or open a project before training.")
+            return
+        ModelController.ensure_project_state(self.project)
+        queue = list(self.project.get("model_queue", []))
+        if not queue:
+            QMessageBox.warning(self, "Empty Queue", "Add at least one model to the queue.")
+            return
+
+        if self.working_df.empty:
+            QMessageBox.warning(self, "No Working Data", "Training queue requires the working dataframe from Data & Features.")
+            return
+
+        decision = QMessageBox.question(
             self,
-            "Delete Model",
-            f"Delete '{model_name}' from this project?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            "Parallel Processing",
+            "Run queue in parallel?\n\nParallel processing may increase CPU usage significantly.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.No,
         )
-        if result != QMessageBox.StandardButton.Yes:
+        if decision == QMessageBox.StandardButton.Cancel:
             return
+        use_parallel = decision == QMessageBox.StandardButton.Yes
+
+        self._queue_parallel = bool(use_parallel)
+        self._queue_pending = list(queue)
+        self._queue_failures = []
+        self._queue_total = len(queue)
+        self.unified_model_page.set_training(True)
+
+        if self._queue_parallel:
+            for name in list(self._queue_pending):
+                self._start_queue_worker(name)
+        else:
+            self._start_next_serial_worker()
+
+    def _start_next_serial_worker(self):
+        if not getattr(self, "_queue_pending", []):
+            self._finish_queue_training()
+            return
+        self._start_queue_worker(self._queue_pending[0])
+
+    def _start_queue_worker(self, name):
+        entry = ModelController.find_added_model(self.project, name)
+        if entry is None:
+            self._queue_failures.append((name, "Model entry was not found."))
+            if name in self._queue_pending:
+                self._queue_pending.remove(name)
+            if self._queue_parallel:
+                if not self._queue_pending:
+                    self._finish_queue_training()
+            else:
+                self._start_next_serial_worker()
+            return
+
+        label = self.project.get("label_column") or self.label_combo.currentText()
+        worker = UnifiedModelTrainingWorker(
+            dataframe=self.working_df,
+            label_column=label,
+            added_model_entry=entry,
+            saved_models=self.project.get("models", []),
+        )
+        worker.signals.finished.connect(self.on_queue_model_trained)
+        worker.signals.error.connect(lambda error, n=name: self.on_queue_model_error(n, error))
+        self.thread_pool.start(worker)
+
+    def on_queue_model_trained(self, payload):
+        name = payload["name"]
         self.project["models"] = [
             model for model in self.project.get("models", [])
-            if model.get("display_name") != model_name
+            if model.get("display_name") != name
         ]
-        self._set_dirty(True)
-        self.refresh_model_page()
-
-    def test_saved_models(self, model_names):
-        """Evaluate selected project models against a user-selected labelled dataset."""
-        if not self.project or not model_names:
-            QMessageBox.warning(self, "No Models Selected", "Select at least one saved model to test.")
-            return
-
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Test Dataset",
-            str(self.downloads_dir),
-            "Data Files (*.csv *.xlsx *.xls *.mat);;All Files (*.*)",
-        )
-        if not path:
-            return
-
-        try:
-            datasets = get_datasets(Path(path))
-            if not datasets:
-                raise ValueError("No datasets were found in the selected file.")
-            dataset = datasets[0]
-            if len(datasets) > 1:
-                dataset, accepted = QInputDialog.getItem(
-                    self, "Select Test Dataset", "Dataset", datasets, 0, False,
-                )
-                if not accepted:
-                    return
-            columns = get_available_columns(Path(path), dataset)
-            label, accepted = QInputDialog.getItem(
-                self,
-                "Select Test Label",
-                "Label column",
-                [str(column) for column in columns],
-                max(0, columns.index(self.project.get("label_column")))
-                if self.project.get("label_column") in columns else 0,
-                False,
-            )
-            if not accepted:
-                return
-            test_df = select_col(Path(path), dataset, columns)
-        except Exception as error:
-            self.show_error("Test Dataset Error", error)
-            return
-
-        selected_models = [
-            model for model in self.project.get("models", [])
-            if model.get("display_name") in model_names
-        ]
-        self.model_sidebar.set_training(True)
-        self.supervised_model_page.set_training(True)
-        worker = ModelEvaluationWorker(selected_models, test_df, label)
-        worker.signals.finished.connect(self.on_models_tested)
-        worker.signals.error.connect(self.on_supervised_model_error)
-        self.thread_pool.start(worker)
-
-    def on_models_tested(self, results):
-        self.model_sidebar.set_training(False)
-        self.supervised_model_page.set_training(False)
-        if not results:
-            QMessageBox.warning(self, "Test Results", "No model results were returned.")
-            return
-        comparison = pd.DataFrame([
-            {"model": item["name"], **item["metrics"]}
-            for item in results
-        ])
-        self.supervised_model_page.metrics_model.set_data(comparison.round(4))
-        self.supervised_model_page.confusion_model.set_data(pd.DataFrame(results[0]["confusion_matrix"]))
-        QMessageBox.information(self, "Testing Complete", f"Tested {len(results)} model(s).")
-
-    def train_semi_supervised_model(self, options):
-        """Run self-training on partially labelled project data and a held-out dataset."""
-        if self.project is None:
-            QMessageBox.warning(self, "No Project", "Create or open a project before training a model.")
-            return
-
-        train_df = self.working_df if not self.working_df.empty else self.og_df
-        label = self.project.get("label_column") or self.label_combo.currentText()
-        if train_df.empty or not label or label not in train_df.columns:
-            QMessageBox.warning(self, "Training Unavailable", "Select a dataset and a valid label column before training.")
-            return
-        if not train_df[label].notna().any():
-            QMessageBox.warning(self, "Training Unavailable", "Self-training needs at least one labelled row in the project dataset.")
-            return
-
-        features = train_df.select_dtypes(include="number").columns.drop(label, errors="ignore").tolist()
-        expected_features = options["pretrained_model"].get("feature_columns", [])
-        # SelfTrainingClassifier clones the saved estimator, so its incoming
-        # feature order must exactly match the estimator's training contract.
-        if features != expected_features:
-            QMessageBox.warning(
-                self,
-                "Model Compatibility",
-                "Choose a saved model trained with the same numeric feature columns as this project.",
-            )
-            return
-
-        test_df = self._select_evaluation_dataset(label)
-        if test_df is None:
-            return
-
-        self.semi_supervised_sidebar.set_training(True)
-        self.semi_supervised_model_page.set_training(True)
-        worker = SemiSupervisedTrainingWorker(train_df, test_df, label, options)
-        worker.signals.finished.connect(self.on_semi_supervised_model_trained)
-        worker.signals.error.connect(self.on_semi_supervised_model_error)
-        self.thread_pool.start(worker)
-
-    def _select_evaluation_dataset(self, label):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open Labelled Evaluation Dataset",
-            str(self.downloads_dir),
-            "Data Files (*.csv *.xlsx *.xls *.mat);;All Files (*.*)",
-        )
-        if not path:
-            return None
-        try:
-            path = Path(path)
-            datasets = get_datasets(path)
-            if not datasets:
-                raise ValueError("No datasets were found in the selected file.")
-            dataset = datasets[0]
-            if len(datasets) > 1:
-                dataset, accepted = QInputDialog.getItem(self, "Select Evaluation Dataset", "Dataset", datasets, 0, False)
-                if not accepted:
-                    return None
-            columns = get_available_columns(path, dataset)
-            if label not in columns:
-                raise ValueError(f"The evaluation dataset must include the '{label}' label column.")
-            return select_col(path, dataset, columns)
-        except Exception as error:
-            self.show_error("Evaluation Dataset Error", error)
-            return None
-
-    def on_semi_supervised_model_trained(self, payload):
-        options, result = payload
-        self.semi_supervised_sidebar.set_training(False)
-        self.semi_supervised_model_page.set_training(False)
-        existing_names = {m.get("display_name") for m in self.project.get("models", [])}
-        base_name = "Self-Training"
-        counter = 1
-        name = f"{base_name} {counter}"
-        while name in existing_names:
-            counter += 1
-            name = f"{base_name} {counter}"
         self.project.setdefault("models", []).append({
             "display_name": name,
-            "algorithm": "semi_supervised",
-            "model": result["ssl_model"],
-            "parameters": {
-                "base_model": options["pretrained_model"].get("display_name"),
-                "threshold": options["threshold"],
-                "max_iter": options["max_iter"],
-            },
-            "metrics": result["metrics"],
-            "feature_columns": result["features"],
+            "algorithm": payload["algorithm"],
+            "model": payload["trained_model"],
+            "parameters": payload["parameters"],
+            "metrics": payload.get("metrics", {}),
+            "feature_columns": payload.get("feature_columns", []),
         })
+
+        entry = ModelController.find_added_model(self.project, name)
+        if entry is not None:
+            entry["trained"] = True
+            entry["feature_columns"] = payload.get("feature_columns", [])
+            entry["metrics"] = payload.get("metrics", {})
+
+        self.project["model_queue"] = [item for item in self.project.get("model_queue", []) if item != name]
+        if name in self._queue_pending:
+            self._queue_pending.remove(name)
+
         self._set_dirty(True)
         self.refresh_model_page()
-        self.refresh_semi_supervised_page()
-        self.semi_supervised_model_page.set_result(result)
-        QMessageBox.information(self, "Training Complete", f"{name} trained successfully.")
+        if self._queue_parallel:
+            if not self._queue_pending:
+                self._finish_queue_training()
+        else:
+            self._start_next_serial_worker()
 
-    def on_semi_supervised_model_error(self, error):
-        self.semi_supervised_sidebar.set_training(False)
-        self.semi_supervised_model_page.set_training(False)
-        self.show_error("Self-Training Error", error)
+    def on_queue_model_error(self, name, error):
+        self._queue_failures.append((name, str(error)))
+        self.project["model_queue"] = [item for item in self.project.get("model_queue", []) if item != name]
+        if name in self._queue_pending:
+            self._queue_pending.remove(name)
+        self._set_dirty(True)
+        self.refresh_model_page()
+        if self._queue_parallel:
+            if not self._queue_pending:
+                self._finish_queue_training()
+        else:
+            self._start_next_serial_worker()
 
-    def run_unsupervised_model(self, options):
-        """Cluster the active dataset without requiring a labelled target column."""
-        if self.project is None:
-            QMessageBox.warning(self, "No Project", "Create or open a project before running clustering.")
+    def _finish_queue_training(self):
+        self.unified_model_page.set_training(False)
+        failed = len(getattr(self, "_queue_failures", []))
+        trained = int(getattr(self, "_queue_total", 0)) - failed
+        if failed == 0:
+            QMessageBox.information(self, "Training Complete", f"Successfully trained {trained} queued model(s).")
             return
 
-        df = self.working_df if not self.working_df.empty else self.og_df
-        if df.empty:
-            QMessageBox.warning(self, "Clustering Unavailable", "Open a dataset with numeric features before running clustering.")
-            return
-        label = self.project.get("label_column") or self.label_combo.currentText()
-        numeric_features = df.select_dtypes(include="number").columns.drop(label, errors="ignore").tolist()
-        if len(numeric_features) < 2:
-            QMessageBox.warning(
-                self,
-                "Clustering Unavailable",
-                "Clustering needs at least two numeric feature columns in the active dataset.",
-            )
-            return
-
-        self.unsupervised_sidebar.set_running(True)
-        self.unsupervised_model_page.set_running(True)
-        worker = UnsupervisedTrainingWorker(df, label, options)
-        worker.signals.finished.connect(self.on_unsupervised_model_finished)
-        worker.signals.error.connect(self.on_unsupervised_model_error)
-        self.thread_pool.start(worker)
-
-    def on_unsupervised_model_finished(self, payload):
-        options, result = payload
-        self.unsupervised_sidebar.set_running(False)
-        self.unsupervised_model_page.set_running(False)
-        # Cluster runs are exploratory results, not classifiers; do not append
-        # them to project["models"], which assumes predict/evaluate semantics.
-        self.unsupervised_model_page.set_result(result)
-        QMessageBox.information(
+        details = "\n".join([f"{name}: {message}" for name, message in self._queue_failures])
+        QMessageBox.warning(
             self,
-            "Clustering Complete",
-            f"{options['method'].replace('_', ' ').title()} clustering finished successfully.",
+            "Training Completed With Errors",
+            f"Trained {trained} model(s), failed {failed}.\n\n{details}",
         )
 
-    def on_unsupervised_model_error(self, error):
-        self.unsupervised_sidebar.set_running(False)
-        self.unsupervised_model_page.set_running(False)
-        self.show_error("Clustering Error", error)
+    def import_external_model(self):
+        if self.project is None:
+            QMessageBox.warning(self, "No Project", "Create or open a project before importing external models.")
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import External PKL Model",
+            str(self.downloads_dir),
+            "Pickle Files (*.pkl)",
+        )
+        if not path:
+            return
+
+        try:
+            imported = joblib.load(path)
+        except Exception as error:
+            self.show_error("Import Error", error)
+            return
+
+        category, algorithm = self._infer_external_model_category_algorithm(imported)
+        base_name = Path(path).stem
+        existing_names = [item.get("name", "") for item in self.project.get("added_models", [])]
+        name = ModelController.unique_name(base_name, existing_names)
+
+        fallback_category = category or "supervised"
+        fallback_algorithm = algorithm or "svm"
+        entry = ModelController.create_added_model_entry(
+            name=name,
+            category=fallback_category,
+            algorithm=fallback_algorithm,
+            label=self.project.get("label_column", ""),
+            common_parameters=ModelController.default_common_parameters(),
+            required_parameters=ModelController.default_required_parameters(fallback_category, fallback_algorithm),
+            advanced_parameters=ModelController.default_advanced_parameters(fallback_category, fallback_algorithm),
+        )
+        entry["trained"] = True
+        entry["externally_added"] = True
+        feature_columns = []
+        if hasattr(imported, "feature_names_in_"):
+            feature_columns = [str(col) for col in list(imported.feature_names_in_)]
+        entry["feature_columns"] = feature_columns
+        editable = bool(category and algorithm and self.project.get("label_column"))
+        if editable and feature_columns and not self.working_df.empty:
+            editable = all(column in self.working_df.columns for column in feature_columns)
+        entry["editable_external"] = editable
+
+        self.project.setdefault("added_models", []).append(entry)
+        self.project.setdefault("models", []).append({
+            "display_name": name,
+            "algorithm": algorithm or "external",
+            "model": imported,
+            "parameters": {},
+            "metrics": {},
+            "feature_columns": feature_columns,
+        })
+
+        self._set_dirty(True)
+        self.refresh_model_page()
+        QMessageBox.information(
+            self,
+            "External Model Imported",
+            "Model added as externally imported."
+            + (" It is editable because it matches a supported workflow." if editable else " It is inspect-only for this dataset."),
+        )
+
+    def _infer_external_model_category_algorithm(self, model):
+        mappings = [
+            (SVC, ("supervised", "svm")),
+            (KNeighborsClassifier, ("supervised", "knn")),
+            (DecisionTreeClassifier, ("supervised", "decision_tree")),
+            (RandomForestClassifier, ("supervised", "random_forest")),
+            (LogisticRegression, ("supervised", "logistic_regression")),
+            (SelfTrainingClassifier, ("semi_supervised", "self_training")),
+            (KMeans, ("unsupervised", "kmeans")),
+            (DBSCAN, ("unsupervised", "dbscan")),
+            (AgglomerativeClustering, ("unsupervised", "hierarchical")),
+        ]
+        for cls, values in mappings:
+            if isinstance(model, cls):
+                return values
+        return None, None
 
     def on_preview_header_menu(self, pos):
         header = self.preview_table.horizontalHeader()
@@ -2209,6 +2414,8 @@ class AnalyticsWindow(QMainWindow):
                 "preprocessing": [],
                 "visualizations": [],
                 "models": [],
+                "added_models": [],
+                "model_queue": [],
             }
             if self.current_project_path is None:
                 self.current_project_path = self._choose_project_save_path(default_name=project_name)
