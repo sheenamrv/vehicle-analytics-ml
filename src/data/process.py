@@ -78,7 +78,10 @@ def save_project(project, original_df, mod_df, target_path=None, feature_df=None
                 "display_name" : model_info["display_name"],
                 "algorithm" : model_info["algorithm"],
                 "parameters" : model_info["parameters"],
-                "metrics" : model_info["metrics"]
+                "metrics" : model_info["metrics"],
+                "category": model_info.get("category", ""),
+                "feature_columns": model_info.get("feature_columns", []),
+                "evaluation": model_info.get("evaluation", {}),
             }
             
             with open(metadata_path, "w") as f:
@@ -184,6 +187,9 @@ def load_project(icp_path):
             model_info["algorithm"] = (metadata["algorithm"])
             model_info["parameters"] = (metadata["parameters"])
             model_info["metrics"] = (metadata["metrics"])
+            model_info["category"] = metadata.get("category", "")
+            model_info["feature_columns"] = metadata.get("feature_columns", model_info.get("feature_columns", []))
+            model_info["evaluation"] = metadata.get("evaluation", {})
             
         try:
             og_df = joblib.load(

@@ -1,10 +1,13 @@
 from pathlib import Path
+from datetime import datetime
+import tempfile
 import json
 import joblib
 
 import numpy as np
 import pandas as pd
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QColor
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -25,6 +28,8 @@ from PySide6.QtWidgets import (
     QDialog,
     QPushButton,
     QTableView,
+    QListWidget,
+    QListWidgetItem,
 )
 from PySide6.QtCore import (
     Qt,
@@ -81,6 +86,13 @@ from src.model.model_training import evaluate_saved_models
 from src.model.semisupervised_model import run_ssl_workflow
 from src.model.unsupervised_model import run_unsupervised_workflow
 from src.model.model_controller import ModelController
+from src.model.result_builders import (
+    export_model_report,
+    generate_model_report_assets,
+    render_comparison_metrics_image,
+    render_combined_confusion_matrices_image,
+)
+from src.model.model_utils import prepare_training_data, align_features
 
 
 class WorkerSignals(QObject):
@@ -415,6 +427,163 @@ class DataQualityDialog(QDialog):
             self.accept()
 
 
+class ReportImagesDialog(QDialog):
+    def __init__(self, parent, title, image_paths):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(980, 680)
+        self._images = [Path(path) for path in image_paths if Path(path).exists()]
+        self._index = 0
+        self._current_image_path = None
+        self._zoom = 1.0
+
+        layout = QVBoxLayout(self)
+
+        self.image_name = QLabel("")
+        layout.addWidget(self.image_name)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.scroll.setWidget(self.image_label)
+        layout.addWidget(self.scroll, 1)
+
+        controls = QHBoxLayout()
+        self.prev_button = secondary_button("Previous")
+        self.prev_button.clicked.connect(lambda: self._step(-1))
+        self.next_button = secondary_button("Next")
+        self.next_button.clicked.connect(lambda: self._step(1))
+        zoom_out = secondary_button("-")
+        zoom_out.clicked.connect(lambda: self._change_zoom(0.85))
+        zoom_in = secondary_button("+")
+        zoom_in.clicked.connect(lambda: self._change_zoom(1.15))
+        reset_zoom = secondary_button("Reset")
+        reset_zoom.clicked.connect(self._reset_zoom)
+        close_button = primary_button("Close")
+        close_button.clicked.connect(self.accept)
+
+        controls.addWidget(self.prev_button)
+        controls.addWidget(self.next_button)
+        controls.addWidget(zoom_out)
+        controls.addWidget(zoom_in)
+        controls.addWidget(reset_zoom)
+        controls.addStretch()
+        controls.addWidget(close_button)
+        layout.addLayout(controls)
+
+        self._refresh_view()
+
+    def _step(self, delta):
+        if not self._images:
+            return
+        self._index = (self._index + delta) % len(self._images)
+        self._refresh_view()
+
+    def _refresh_view(self):
+        if not self._images:
+            self.image_name.setText("No report images were found for this model.")
+            self.image_label.clear()
+            self.prev_button.setEnabled(False)
+            self.next_button.setEnabled(False)
+            return
+
+        image_path = self._images[self._index]
+        self._current_image_path = image_path
+        self._zoom = 1.0
+        self._apply_zoomed_pixmap()
+
+        pixmap = QPixmap(str(image_path))
+        if pixmap.isNull():
+            self.image_name.setText(f"Could not load image: {image_path.name}")
+            self.image_label.clear()
+        else:
+            self.image_name.setText(f"{self._index + 1}/{len(self._images)} - {image_path.name}")
+
+        enable_nav = len(self._images) > 1
+        self.prev_button.setEnabled(enable_nav)
+        self.next_button.setEnabled(enable_nav)
+
+    def _change_zoom(self, factor):
+        if self._current_image_path is None:
+            return
+        self._zoom = max(0.1, min(6.0, self._zoom * factor))
+        self._apply_zoomed_pixmap()
+
+    def _reset_zoom(self):
+        self._zoom = 1.0
+        self._apply_zoomed_pixmap()
+
+    def _apply_zoomed_pixmap(self):
+        if self._current_image_path is None:
+            return
+        pixmap = QPixmap(str(self._current_image_path))
+        if pixmap.isNull():
+            self.image_label.clear()
+            return
+        width = max(1, int(pixmap.width() * self._zoom))
+        height = max(1, int(pixmap.height() * self._zoom))
+        scaled = pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.image_label.setPixmap(scaled)
+        self.image_label.adjustSize()
+
+
+class ImageInspectDialog(QDialog):
+    def __init__(self, parent, title, image_path):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(980, 720)
+        self._base_pixmap = QPixmap(str(image_path))
+        self._zoom = 1.0
+
+        layout = QVBoxLayout(self)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.scroll.setWidget(self.image_label)
+        layout.addWidget(self.scroll, 1)
+
+        controls = QHBoxLayout()
+        zoom_out = secondary_button("-")
+        zoom_out.clicked.connect(lambda: self._change_zoom(0.85))
+        zoom_in = secondary_button("+")
+        zoom_in.clicked.connect(lambda: self._change_zoom(1.15))
+        reset = secondary_button("Reset")
+        reset.clicked.connect(self._reset_zoom)
+        close_button = primary_button("Close")
+        close_button.clicked.connect(self.accept)
+
+        controls.addWidget(zoom_out)
+        controls.addWidget(zoom_in)
+        controls.addWidget(reset)
+        controls.addStretch()
+        controls.addWidget(close_button)
+        layout.addLayout(controls)
+
+        self._apply_zoom()
+
+    def _change_zoom(self, factor):
+        if self._base_pixmap.isNull():
+            return
+        self._zoom = max(0.1, min(6.0, self._zoom * factor))
+        self._apply_zoom()
+
+    def _reset_zoom(self):
+        self._zoom = 1.0
+        self._apply_zoom()
+
+    def _apply_zoom(self):
+        if self._base_pixmap.isNull():
+            self.image_label.setText("Unable to load image.")
+            return
+        width = max(1, int(self._base_pixmap.width() * self._zoom))
+        height = max(1, int(self._base_pixmap.height() * self._zoom))
+        scaled = self._base_pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.image_label.setPixmap(scaled)
+        self.image_label.adjustSize()
+
+
 '''
     Main font end window for the application
 '''
@@ -499,6 +668,12 @@ class AnalyticsWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         apply_app_styles(self)
+        self._result_records = []
+        self._comparison_records = []
+        self._comparison_metric_image_path = None
+        self._comparison_cm_image_path = None
+        self._preview_report_root = Path(tempfile.gettempdir()) / "vehicle_analytics_result_previews"
+        self._preview_report_root.mkdir(parents=True, exist_ok=True)
 
 # ============================================================================
 # Menu Bar
@@ -772,6 +947,37 @@ class AnalyticsWindow(QMainWindow):
         export = secondary_button("Export Comparison")
         export.clicked.connect(self.export_results_comparison)
         layout.addWidget(export)
+
+        self.results_comparison_controls = QWidget()
+        controls_layout = QVBoxLayout(self.results_comparison_controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
+        controls_layout.addWidget(divider())
+        controls_layout.addWidget(section_label("COMPARE MODELS"))
+        self.comparison_model_list = QListWidget()
+        self.comparison_model_list.setMinimumHeight(210)
+        self.comparison_model_list.itemChanged.connect(self.on_comparison_list_changed)
+        controls_layout.addWidget(self.comparison_model_list)
+
+        selection_buttons = QHBoxLayout()
+        select_all_button = secondary_button("Select All")
+        select_all_button.clicked.connect(self.select_all_comparison_models)
+        clear_all_button = secondary_button("Clear")
+        clear_all_button.clicked.connect(self.clear_all_comparison_models)
+        selection_buttons.addWidget(select_all_button)
+        selection_buttons.addWidget(clear_all_button)
+        controls_layout.addLayout(selection_buttons)
+
+        controls_layout.addWidget(section_label("COMPARE EXPORT"))
+        self.comparison_export_mode = taller_dropdown(QComboBox())
+        self.comparison_export_mode.addItems(["Metrics", "Confusion Matrix", "Both"])
+        controls_layout.addWidget(self.comparison_export_mode)
+        export_png = primary_button("Export PNG")
+        export_png.clicked.connect(self.export_comparison_images)
+        controls_layout.addWidget(export_png)
+
+        self.results_comparison_controls.setVisible(False)
+        layout.addWidget(self.results_comparison_controls)
         layout.addStretch()
         return panel
 
@@ -1058,7 +1264,7 @@ class AnalyticsWindow(QMainWindow):
         self.results_pages = QStackedWidget()
         self.results_model = PandasTableModel()
         self.result_details_model = PandasTableModel()
-        self.comparison_model = PandasTableModel()
+        self.result_confusion_model = PandasTableModel()
 
         results_view = QWidget()
         results_layout = QVBoxLayout(results_view)
@@ -1066,19 +1272,37 @@ class AnalyticsWindow(QMainWindow):
         results_layout.addWidget(section_label("TRAINED MODELS"))
         self.results_table = table_view(self.results_model)
         self.results_table.selectionModel().selectionChanged.connect(self.on_result_selection_changed)
+        self.results_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.results_table.customContextMenuRequested.connect(self.on_results_context_menu)
         results_layout.addWidget(self.results_table, 2)
-        results_layout.addWidget(data_panel("TRAINING INFO", self.result_details_model), 1)
+        details_layout = QHBoxLayout()
+        details_layout.setSpacing(16)
+        details_layout.addWidget(data_panel("TRAINING INFO", self.result_details_model), 1)
+        details_layout.addWidget(data_panel("CONFUSION MATRIX", self.result_confusion_model), 1)
+        results_layout.addLayout(details_layout, 1)
 
         comparison_view = QWidget()
         comparison_layout = QVBoxLayout(comparison_view)
         comparison_layout.setContentsMargins(0, 0, 0, 0)
-        comparison_layout.addWidget(section_label("COMPARISON OVERVIEW"))
-        self.comparison_chart = ChartCanvas(
-            "Train at least one model to compare evaluation metrics.",
-            min_height=260,
-        )
-        comparison_layout.addWidget(self.comparison_chart, 2)
-        comparison_layout.addWidget(data_panel("METRICS OVERVIEW", self.comparison_model), 1)
+        comparison_layout.setSpacing(16)
+
+        comparison_layout.addWidget(section_label("METRICS IMAGE"))
+        self.comparison_metric_scroll = QScrollArea()
+        self.comparison_metric_scroll.setWidgetResizable(True)
+        self.comparison_metric_label = QLabel("Select model(s) to generate metrics comparison image.")
+        self.comparison_metric_label.setAlignment(Qt.AlignCenter)
+        self.comparison_metric_label.mousePressEvent = lambda event: self.inspect_comparison_image("metrics", event)
+        self.comparison_metric_scroll.setWidget(self.comparison_metric_label)
+        comparison_layout.addWidget(self.comparison_metric_scroll, 1)
+
+        comparison_layout.addWidget(section_label("COMBINED CONFUSION MATRIX IMAGE"))
+        self.comparison_cm_scroll = QScrollArea()
+        self.comparison_cm_scroll.setWidgetResizable(True)
+        self.comparison_cm_label = QLabel("Select model(s) with confusion matrices to generate combined image.")
+        self.comparison_cm_label.setAlignment(Qt.AlignCenter)
+        self.comparison_cm_label.mousePressEvent = lambda event: self.inspect_comparison_image("cm", event)
+        self.comparison_cm_scroll.setWidget(self.comparison_cm_label)
+        comparison_layout.addWidget(self.comparison_cm_scroll, 1)
         self.results_pages.addWidget(results_view)
         self.results_pages.addWidget(comparison_view)
         layout.addWidget(self.results_pages, 1)
@@ -1131,44 +1355,612 @@ class AnalyticsWindow(QMainWindow):
     def on_results_tab_changed(self, index):
         self.results_tabs["buttons"][index].setChecked(True)
         self.results_pages.setCurrentIndex(index)
+        if hasattr(self, "results_comparison_controls"):
+            self.results_comparison_controls.setVisible(index == 1)
+
+    @staticmethod
+    def _round_metric(value):
+        if isinstance(value, (int, float)):
+            return round(float(value), 4)
+        return value
+
+    def _normalize_evaluation_snapshot(self, result):
+        snapshot = {}
+        if not isinstance(result, dict):
+            return snapshot
+
+        matrix = result.get("confusion_matrix")
+        if matrix is not None:
+            try:
+                matrix_df = pd.DataFrame(matrix)
+                if not matrix_df.empty:
+                    snapshot["confusion_matrix"] = matrix_df.fillna(0).astype(int).values.tolist()
+                    if "y_test" in result:
+                        labels = [str(label) for label in sorted(pd.unique(result["y_test"]))]
+                    else:
+                        labels = [str(index) for index in range(matrix_df.shape[0])]
+                    snapshot["confusion_labels"] = labels
+            except Exception:
+                pass
+
+        if "iteration_progress" in result:
+            try:
+                snapshot["ssl_progress"] = pd.DataFrame(result["iteration_progress"]).to_dict(orient="records")
+            except Exception:
+                pass
+
+        if "summary_df" in result:
+            try:
+                snapshot["cluster_summary"] = pd.DataFrame(result["summary_df"]).to_dict(orient="records")
+            except Exception:
+                pass
+
+        return snapshot
+
+    def _load_exported_results(self):
+        exported = []
+        exported_dir = Path("ExportedModels")
+        if not exported_dir.exists():
+            return exported
+
+        for json_path in sorted(exported_dir.glob("*.json")):
+            try:
+                with open(json_path, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except Exception:
+                continue
+
+            display_name = str(payload.get("display_name") or json_path.stem)
+            exported.append({
+                "name": display_name,
+                "display_name": display_name,
+                "algorithm": str(payload.get("algorithm", "")),
+                "category": str(payload.get("category", "")),
+                "metrics": payload.get("metrics", {}),
+                "parameters": payload.get("parameters", {}),
+                "feature_columns": payload.get("feature_columns", []),
+                "evaluation": {
+                    "confusion_matrix": payload.get("confusion_matrix"),
+                    "confusion_labels": payload.get("confusion_labels"),
+                    "cluster_summary": payload.get("cluster_summary"),
+                    "ssl_progress": payload.get("ssl_progress"),
+                },
+                "source": f"exported:{json_path.name}",
+                "trained": True,
+                "model": None,
+            })
+        return exported
+
+    def _collect_trained_result_records(self):
+        records = []
+        seen = set()
+
+        if self.project:
+            added_lookup = {
+                item.get("name"): item
+                for item in self.project.get("added_models", [])
+            }
+            for model in self.project.get("models", []):
+                name = model.get("display_name", "")
+                if not name:
+                    continue
+                added = added_lookup.get(name, {})
+                key = ("project", name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append({
+                    "name": name,
+                    "display_name": name,
+                    "label": added.get("label", self.project.get("label_column", "")),
+                    "algorithm": model.get("algorithm", ""),
+                    "category": model.get("category") or added.get("category", ""),
+                    "metrics": model.get("metrics", {}),
+                    "parameters": model.get("parameters", {}),
+                    "common_parameters": added.get("common_parameters", {}),
+                    "required_parameters": added.get("required_parameters", {}),
+                    "advanced_parameters": added.get("advanced_parameters", {}),
+                    "feature_columns": model.get("feature_columns", []),
+                    "evaluation": model.get("evaluation", {}),
+                    "source": "project",
+                    "trained": True,
+                    "model": model.get("model"),
+                })
+
+        return records
+
+    def _records_to_table_rows(self, records):
+        rows = []
+        for record in records:
+            metrics = record.get("metrics", {})
+            rows.append({
+                "name": record.get("name", ""),
+                "label": record.get("label", ""),
+                "source": record.get("source", "project"),
+                "category": record.get("category", ""),
+                "algorithm": record.get("algorithm", ""),
+                "accuracy": self._round_metric(metrics.get("accuracy")),
+                "precision": self._round_metric(metrics.get("precision")),
+                "recall": self._round_metric(metrics.get("recall")),
+                "f1": self._round_metric(metrics.get("f1")),
+            })
+        return rows
 
     def refresh_results_page(self):
-        # Results are a read-only projection of project model metadata. Estimator
-        # objects stay in the project and never enter the table model.
-        models = self.project.get("models", []) if self.project else []
-        rows = [{
-            "name": model.get("display_name", ""),
-            "algorithm": model.get("algorithm", ""),
-            "accuracy": model.get("metrics", {}).get("accuracy"),
-            "precision": model.get("metrics", {}).get("precision"),
-            "recall": model.get("metrics", {}).get("recall"),
-            "f1": model.get("metrics", {}).get("f1"),
-        } for model in models]
-        comparison = pd.DataFrame(rows, columns=["name", "algorithm", "accuracy", "precision", "recall", "f1"])
-        self.results_model.set_data(comparison)
-        self.comparison_model.set_data(comparison)
+        records = self._collect_trained_result_records() if self.project else []
+        self._result_records = records
+
+        rows = self._records_to_table_rows(records)
+        table = pd.DataFrame(
+            rows,
+            columns=["name", "label", "source", "category", "algorithm", "accuracy", "precision", "recall", "f1"],
+        )
+        self.results_model.set_data(table)
+        self._comparison_records = list(records)
+        self._refresh_comparison_model_list(records)
+        self._clear_comparison_images()
         self.result_details_model.set_data(pd.DataFrame())
-        self.comparison_chart.plot_model_comparison(comparison)
+        self.result_confusion_model.set_data(pd.DataFrame())
 
     def on_result_selection_changed(self, selected, deselected):
+        del selected, deselected
         indexes = self.results_table.selectionModel().selectedRows()
-        if not indexes or not self.project:
+        if not indexes or not self._result_records:
+            self.result_details_model.set_data(pd.DataFrame())
+            self.result_confusion_model.set_data(pd.DataFrame())
             return
         name = self.results_model._data.iloc[indexes[0].row()]["name"]
-        model = next((item for item in self.project.get("models", []) if item.get("display_name") == name), {})
-        details = [("algorithm", model.get("algorithm", "")), ("features", ", ".join(model.get("feature_columns", [])))]
-        details.extend((f"parameter: {key}", value) for key, value in model.get("parameters", {}).items())
+        model = next((item for item in self._result_records if item.get("name") == name), {})
+        details = [
+            ("source", model.get("source", "")),
+            ("label", model.get("label", "")),
+            ("category", model.get("category", "")),
+            ("algorithm", model.get("algorithm", "")),
+            ("features", ", ".join(model.get("feature_columns", []))),
+        ]
+        details.extend((f"common: {key}", value) for key, value in model.get("common_parameters", {}).items())
+        details.extend((f"required: {key}", value) for key, value in model.get("required_parameters", {}).items())
+        details.extend((f"advanced: {key}", value) for key, value in model.get("advanced_parameters", {}).items())
         self.result_details_model.set_data(pd.DataFrame(details, columns=["field", "value"]))
 
+        evaluation = model.get("evaluation", {}) or {}
+        matrix = evaluation.get("confusion_matrix")
+        labels = evaluation.get("confusion_labels")
+        if matrix:
+            try:
+                matrix_df = pd.DataFrame(matrix)
+                if labels and len(labels) == matrix_df.shape[0] == matrix_df.shape[1]:
+                    matrix_df.index = [str(label) for label in labels]
+                    matrix_df.columns = [str(label) for label in labels]
+                matrix_df.index.name = "actual"
+                self.result_confusion_model.set_data(matrix_df)
+            except Exception:
+                self.result_confusion_model.set_data(pd.DataFrame())
+        else:
+            self.result_confusion_model.set_data(pd.DataFrame())
+
+    def on_results_context_menu(self, position):
+        selected_rows = self.results_table.selectionModel().selectedRows()
+        if not selected_rows:
+            return
+
+        menu = QMenu(self)
+        menu.addAction("Inspect Model", self.inspect_selected_result_model)
+        menu.addAction("View Report Images", self.view_selected_result_report_images)
+        menu.addSeparator()
+        menu.addAction("Export Model Report", self.export_selected_model_reports)
+        menu.exec(self.results_table.viewport().mapToGlobal(position))
+
+    def _selected_result_record(self):
+        rows = self.results_table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        name = self.results_model._data.iloc[rows[0].row()].get("name", "")
+        return next((record for record in self._result_records if record.get("name") == name), None)
+
+    def inspect_selected_result_model(self):
+        record = self._selected_result_record()
+        if not record:
+            return
+
+        evaluation = record.get("evaluation", {}) or {}
+        details = [
+            f"Name: {record.get('name', '')}",
+            f"Source: {record.get('source', '')}",
+            f"Category: {record.get('category', '')}",
+            f"Algorithm: {record.get('algorithm', '')}",
+            f"Features: {', '.join(record.get('feature_columns', [])) or 'None'}",
+            "",
+            "Metrics:",
+        ]
+        for key, value in record.get("metrics", {}).items():
+            details.append(f"  {key}: {self._round_metric(value)}")
+        details.append("")
+        details.append(f"Confusion Matrix Available: {'Yes' if evaluation.get('confusion_matrix') else 'No'}")
+        details.append(f"Report PDF: {evaluation.get('report_pdf', 'Not generated')}")
+        QMessageBox.information(self, "Model Inspect", "\n".join(details))
+
+    def view_selected_result_report_images(self):
+        record = self._selected_result_record()
+        if not record:
+            return
+
+        evaluation = record.get("evaluation", {}) or {}
+        images = [path for path in evaluation.get("report_images", []) if Path(path).exists()]
+        if not images:
+            _, _, generated = self._generate_preview_report_assets(record)
+            images = [str(path) for path in generated]
+        if not images:
+            QMessageBox.information(self, "No Report Images", "No report images were found for the selected model.")
+            return
+
+        dialog = ReportImagesDialog(self, f"Report Images - {record.get('name', '')}", images)
+        dialog.exec()
+
+    def _generate_preview_report_assets(self, record):
+        report_context = self._build_report_context(record)
+        evaluation = dict(record.get("evaluation", {}) or {})
+
+        if report_context.get("is_correlated") and not evaluation.get("confusion_matrix"):
+            y_true = report_context.get("y_true")
+            y_pred = report_context.get("y_pred")
+            try:
+                labels = sorted(pd.unique(y_true))
+                matrix = pd.crosstab(
+                    pd.Series(y_true, name="actual"),
+                    pd.Series(y_pred, name="predicted"),
+                    dropna=False,
+                )
+                matrix = matrix.reindex(index=labels, columns=labels, fill_value=0)
+                evaluation["confusion_matrix"] = matrix.values.tolist()
+                evaluation["confusion_labels"] = [str(label) for label in labels]
+            except Exception:
+                pass
+
+        model_record = {
+            "name": record.get("name"),
+            "display_name": record.get("display_name"),
+            "algorithm": record.get("algorithm"),
+            "category": record.get("category"),
+            "metrics": record.get("metrics", {}),
+            "feature_columns": record.get("feature_columns", []),
+            "confusion_matrix": evaluation.get("confusion_matrix"),
+            "confusion_labels": evaluation.get("confusion_labels"),
+            "cluster_summary": evaluation.get("cluster_summary"),
+            "ssl_progress": evaluation.get("ssl_progress"),
+            "model": record.get("model"),
+            "X": report_context.get("X"),
+            "y": report_context.get("y"),
+            "y_true": report_context.get("y_true"),
+            "y_pred": report_context.get("y_pred"),
+            "y_score": report_context.get("y_score"),
+            "is_correlated": report_context.get("is_correlated", False),
+        }
+        preview_root = self._preview_report_root / datetime.now().strftime("%Y%m%d")
+        return generate_model_report_assets(model_record, preview_root, include_pdf=False)
+
+    def _build_report_context(self, record):
+        context = {
+            "is_correlated": False,
+            "X": None,
+            "y": None,
+            "y_true": None,
+            "y_pred": None,
+            "y_score": None,
+        }
+
+        if not self.project or self.working_df.empty:
+            return context
+
+        model_obj = record.get("model")
+        label_col = self.project.get("label_column")
+        feature_columns = record.get("feature_columns", [])
+        if model_obj is None or not label_col:
+            return context
+        if label_col not in self.working_df.columns:
+            return context
+
+        try:
+            X_raw, y_values = prepare_training_data(
+                df=self.working_df,
+                label_col=label_col,
+                features=feature_columns if feature_columns else None,
+            )
+            expected = list(feature_columns) if feature_columns else list(X_raw.columns)
+            X = align_features(X_raw, expected, fill_value=0)
+        except Exception:
+            return context
+
+        try:
+            y_pred = model_obj.predict(X)
+        except Exception:
+            return context
+
+        y_score = None
+        try:
+            if hasattr(model_obj, "predict_proba"):
+                y_score = model_obj.predict_proba(X)
+            elif hasattr(model_obj, "decision_function"):
+                y_score = model_obj.decision_function(X)
+        except Exception:
+            y_score = None
+
+        context.update({
+            "is_correlated": True,
+            "X": X.values,
+            "y": np.array(y_values),
+            "y_true": np.array(y_values),
+            "y_pred": np.array(y_pred),
+            "y_score": y_score,
+        })
+        return context
+
+    def _refresh_comparison_model_list(self, records):
+        self.comparison_model_list.blockSignals(True)
+        self.comparison_model_list.clear()
+        for record in records:
+            item = QListWidgetItem(record.get("name", ""))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            self.comparison_model_list.addItem(item)
+        self.comparison_model_list.blockSignals(False)
+
+    def select_all_comparison_models(self):
+        self.comparison_model_list.blockSignals(True)
+        for index in range(self.comparison_model_list.count()):
+            self.comparison_model_list.item(index).setCheckState(Qt.Checked)
+        self.comparison_model_list.blockSignals(False)
+        self.on_comparison_list_changed(None)
+
+    def clear_all_comparison_models(self):
+        self.comparison_model_list.blockSignals(True)
+        for index in range(self.comparison_model_list.count()):
+            self.comparison_model_list.item(index).setCheckState(Qt.Unchecked)
+        self.comparison_model_list.blockSignals(False)
+        self.on_comparison_list_changed(None)
+
+    def on_comparison_list_changed(self, item):
+        del item
+        selected_names = []
+        for index in range(self.comparison_model_list.count()):
+            list_item = self.comparison_model_list.item(index)
+            if list_item.checkState() == Qt.Checked:
+                selected_names.append(list_item.text())
+
+        selected_records = [record for record in self._comparison_records if record.get("name") in selected_names]
+        self._render_comparison_images(selected_records)
+
+    def _clear_comparison_images(self):
+        self._comparison_metric_image_path = None
+        self._comparison_cm_image_path = None
+        self.comparison_metric_label.clear()
+        self.comparison_metric_label.setText("Select model(s) to generate metrics comparison image.")
+        self.comparison_cm_label.clear()
+        self.comparison_cm_label.setText("Select model(s) with confusion matrices to generate combined image.")
+
+    def inspect_comparison_image(self, image_type, event):
+        del event
+        if image_type == "metrics":
+            path = self._comparison_metric_image_path
+            title = "Inspect - Comparison Metrics"
+        else:
+            path = self._comparison_cm_image_path
+            title = "Inspect - Combined Confusion Matrix"
+
+        if not path or not Path(path).exists():
+            return
+        dialog = ImageInspectDialog(self, title, path)
+        dialog.exec()
+
+    def _render_comparison_images(self, selected_records):
+        self._comparison_metric_image_path = None
+        self._comparison_cm_image_path = None
+        if not selected_records:
+            self._clear_comparison_images()
+            return
+
+        output_dir = self._preview_report_root / "comparison" / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        metric_path = output_dir / "comparison_metrics.png"
+        if render_comparison_metrics_image(selected_records, metric_path):
+            self._comparison_metric_image_path = metric_path
+            metric_pixmap = QPixmap(str(metric_path))
+            if not metric_pixmap.isNull():
+                self.comparison_metric_label.setPixmap(metric_pixmap)
+                self.comparison_metric_label.adjustSize()
+            else:
+                self.comparison_metric_label.setText("Failed to render metrics image.")
+        else:
+            self.comparison_metric_label.setText("No metrics available for selected models.")
+
+        cm_path = output_dir / "comparison_combined_cm.png"
+        if render_combined_confusion_matrices_image(selected_records, cm_path):
+            self._comparison_cm_image_path = cm_path
+            cm_pixmap = QPixmap(str(cm_path))
+            if not cm_pixmap.isNull():
+                self.comparison_cm_label.setPixmap(cm_pixmap)
+                self.comparison_cm_label.adjustSize()
+            else:
+                self.comparison_cm_label.setText("Failed to render combined confusion matrix image.")
+        else:
+            self.comparison_cm_label.setText("No confusion matrices available for selected models.")
+
+    def _prompt_png_name(self, title, default_name):
+        name, accepted = QInputDialog.getText(self, title, "PNG filename (without extension)", text=default_name)
+        if not accepted or not name.strip():
+            return None
+        return f"{name.strip()}.png"
+
+    def _export_generated_image(self, source_path, filename):
+        if not source_path or not Path(source_path).exists():
+            return False
+        output_dir = QFileDialog.getExistingDirectory(self, "Choose Export Folder", str(self.downloads_dir))
+        if not output_dir:
+            return False
+        target_path = Path(output_dir) / filename
+        return QPixmap(str(source_path)).save(str(target_path), "PNG")
+
+    def export_comparison_images(self):
+        mode = self.comparison_export_mode.currentText()
+        if mode == "Metrics":
+            if not self._comparison_metric_image_path:
+                QMessageBox.information(self, "No Metrics Image", "Select model(s) to generate a metrics image first.")
+                return
+            filename = self._prompt_png_name("Export Metrics PNG", "comparison_metrics")
+            if not filename:
+                return
+            if not self._export_generated_image(self._comparison_metric_image_path, filename):
+                QMessageBox.warning(self, "Export Failed", "Unable to export metrics image.")
+            return
+
+        if mode == "Confusion Matrix":
+            if not self._comparison_cm_image_path:
+                QMessageBox.information(self, "No Confusion Image", "Select model(s) with confusion matrix data first.")
+                return
+            filename = self._prompt_png_name("Export Confusion Matrix PNG", "comparison_combined_cm")
+            if not filename:
+                return
+            if not self._export_generated_image(self._comparison_cm_image_path, filename):
+                QMessageBox.warning(self, "Export Failed", "Unable to export confusion matrix image.")
+            return
+
+        # Both
+        if not self._comparison_metric_image_path or not self._comparison_cm_image_path:
+            QMessageBox.information(
+                self,
+                "Missing Images",
+                "Both metrics and combined confusion matrix images must be generated before exporting both.",
+            )
+            return
+        metrics_filename = self._prompt_png_name("Export Metrics PNG", "comparison_metrics")
+        if not metrics_filename:
+            return
+        cm_filename = self._prompt_png_name("Export Confusion Matrix PNG", "comparison_combined_cm")
+        if not cm_filename:
+            return
+        output_dir = QFileDialog.getExistingDirectory(self, "Choose Export Folder", str(self.downloads_dir))
+        if not output_dir:
+            return
+        metrics_ok = QPixmap(str(self._comparison_metric_image_path)).save(str(Path(output_dir) / metrics_filename), "PNG")
+        cm_ok = QPixmap(str(self._comparison_cm_image_path)).save(str(Path(output_dir) / cm_filename), "PNG")
+        if not (metrics_ok and cm_ok):
+            QMessageBox.warning(self, "Export Failed", "One or more images could not be exported.")
+
+    def export_selected_model_reports(self):
+        selected_rows = self.results_table.selectionModel().selectedRows()
+        if not selected_rows:
+            QMessageBox.warning(self, "No Selection", "Select at least one trained model from Results.")
+            return
+
+        output_root = QFileDialog.getExistingDirectory(
+            self,
+            "Choose Export Folder",
+            str(self.downloads_dir),
+        )
+        if not output_root:
+            return
+
+        batch_folder = Path(output_root) / f"model_reports_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        batch_folder.mkdir(parents=True, exist_ok=True)
+
+        exported = 0
+        skipped = []
+        for index in selected_rows:
+            row = self.results_model._data.iloc[index.row()]
+            name = row.get("name", "")
+            record = next((item for item in self._result_records if item.get("name") == name), None)
+            if record is None:
+                skipped.append(name)
+                continue
+
+            evaluation = record.get("evaluation", {}) or {}
+            report_context = self._build_report_context(record)
+
+            if report_context.get("is_correlated") and not evaluation.get("confusion_matrix"):
+                y_true = report_context.get("y_true")
+                y_pred = report_context.get("y_pred")
+                try:
+                    labels = sorted(pd.unique(y_true))
+                    matrix = pd.crosstab(pd.Series(y_true, name="actual"), pd.Series(y_pred, name="predicted"), dropna=False)
+                    matrix = matrix.reindex(index=labels, columns=labels, fill_value=0)
+                    evaluation["confusion_matrix"] = matrix.values.tolist()
+                    evaluation["confusion_labels"] = [str(label) for label in labels]
+                except Exception:
+                    pass
+
+            model_record = {
+                "name": record.get("name"),
+                "display_name": record.get("display_name"),
+                "algorithm": record.get("algorithm"),
+                "category": record.get("category"),
+                "metrics": record.get("metrics", {}),
+                "feature_columns": record.get("feature_columns", []),
+                "confusion_matrix": evaluation.get("confusion_matrix"),
+                "confusion_labels": evaluation.get("confusion_labels"),
+                "cluster_summary": evaluation.get("cluster_summary"),
+                "ssl_progress": evaluation.get("ssl_progress"),
+                "model": record.get("model"),
+                "X": report_context.get("X"),
+                "y": report_context.get("y"),
+                "y_true": report_context.get("y_true"),
+                "y_pred": report_context.get("y_pred"),
+                "y_score": report_context.get("y_score"),
+                "is_correlated": report_context.get("is_correlated", False),
+            }
+            try:
+                _, pdf_path, images = export_model_report(model_record, batch_folder)
+            except Exception as error:
+                skipped.append(f"{name} ({error})")
+                continue
+
+            if pdf_path or images:
+                exported += 1
+                if self.project:
+                    for model in self.project.get("models", []):
+                        if model.get("display_name") == record.get("name"):
+                            model.setdefault("evaluation", {})["report_pdf"] = str(pdf_path) if pdf_path else ""
+                            model.setdefault("evaluation", {})["report_images"] = [str(path) for path in images]
+                            break
+            else:
+                skipped.append(f"{name} (no plottable results)")
+
+        if exported == 0:
+            QMessageBox.warning(
+                self,
+                "Export Incomplete",
+                "No report files were generated.\n" + ("\n".join(skipped) if skipped else ""),
+            )
+            return
+
+        message = f"Generated {exported} model report folder(s) in:\n{batch_folder}"
+        if skipped:
+            message += "\n\nSkipped:\n" + "\n".join(skipped)
+        if self.project and exported:
+            self._set_dirty(True)
+        QMessageBox.information(self, "Report Export Complete", message)
+
     def export_results_comparison(self):
-        if self.comparison_model._data.empty:
+        selected_names = []
+        for index in range(self.comparison_model_list.count()):
+            item = self.comparison_model_list.item(index)
+            if item.checkState() == Qt.Checked:
+                selected_names.append(item.text())
+
+        selected_records = [record for record in self._comparison_records if record.get("name") in selected_names]
+        if not selected_records:
             QMessageBox.warning(self, "No Results", "There are no saved model results to export.")
             return
+
+        frame = pd.DataFrame(
+            self._records_to_table_rows(selected_records),
+            columns=["name", "label", "source", "category", "algorithm", "accuracy", "precision", "recall", "f1"],
+        )
         path, _ = QFileDialog.getSaveFileName(self, "Export Model Comparison", str(self.downloads_dir / "model_results.csv"), "CSV Files (*.csv)")
         if not path:
             return
         try:
-            self.comparison_model._data.to_csv(path, index=False)
+            frame.to_csv(path, index=False)
         except Exception as error:
             self.show_error("Export Error", error)
             return
@@ -1703,10 +2495,12 @@ class AnalyticsWindow(QMainWindow):
             return
 
         if action == "export_json":
+            export_dir = Path("ExportedModels")
+            export_dir.mkdir(parents=True, exist_ok=True)
             path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Export Model Config",
-                str(self.downloads_dir / f"{name}.json"),
+                str(export_dir / f"{name}.json"),
                 "JSON Files (*.json)",
             )
             if not path:
@@ -1719,6 +2513,8 @@ class AnalyticsWindow(QMainWindow):
             required_parameters.update(entry.get("required_parameters", {}))
             advanced_parameters = ModelController.default_advanced_parameters(category, algorithm)
             advanced_parameters.update(entry.get("advanced_parameters", {}))
+            saved = next((model for model in self.project.get("models", []) if model.get("display_name") == name), {})
+            evaluation = saved.get("evaluation", {}) if saved else {}
 
             export_payload = {
                 "name": entry.get("name", ""),
@@ -1732,6 +2528,12 @@ class AnalyticsWindow(QMainWindow):
                 "required_parameters": required_parameters,
                 "advanced_parameters": advanced_parameters,
                 "training_parameters": {**required_parameters, **advanced_parameters},
+                "feature_columns": saved.get("feature_columns", entry.get("feature_columns", [])),
+                "metrics": saved.get("metrics", entry.get("metrics", {})),
+                "confusion_matrix": evaluation.get("confusion_matrix"),
+                "confusion_labels": evaluation.get("confusion_labels"),
+                "cluster_summary": evaluation.get("cluster_summary"),
+                "ssl_progress": evaluation.get("ssl_progress"),
             }
             try:
                 with open(path, "w", encoding="utf-8") as file:
@@ -1748,10 +2550,12 @@ class AnalyticsWindow(QMainWindow):
             if saved is None or "model" not in saved:
                 QMessageBox.warning(self, "Model Missing", "Trained model artifact was not found.")
                 return
+            export_dir = Path("ExportedModels")
+            export_dir.mkdir(parents=True, exist_ok=True)
             path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Export Trained Model",
-                str(self.downloads_dir / f"{name}.pkl"),
+                str(export_dir / f"{name}.pkl"),
                 "Pickle Files (*.pkl)",
             )
             if not path:
@@ -1880,17 +2684,20 @@ class AnalyticsWindow(QMainWindow):
 
     def on_queue_model_trained(self, payload):
         name = payload["name"]
+        snapshot = self._normalize_evaluation_snapshot(payload.get("result", {}))
         self.project["models"] = [
             model for model in self.project.get("models", [])
             if model.get("display_name") != name
         ]
         self.project.setdefault("models", []).append({
             "display_name": name,
+            "category": payload.get("category", ""),
             "algorithm": payload["algorithm"],
             "model": payload["trained_model"],
             "parameters": payload["parameters"],
             "metrics": payload.get("metrics", {}),
             "feature_columns": payload.get("feature_columns", []),
+            "evaluation": snapshot,
         })
 
         entry = ModelController.find_added_model(self.project, name)
@@ -1898,6 +2705,7 @@ class AnalyticsWindow(QMainWindow):
             entry["trained"] = True
             entry["feature_columns"] = payload.get("feature_columns", [])
             entry["metrics"] = payload.get("metrics", {})
+            entry["evaluation"] = snapshot
 
         self.project["model_queue"] = [item for item in self.project.get("model_queue", []) if item != name]
         if name in self._queue_pending:
@@ -1905,6 +2713,7 @@ class AnalyticsWindow(QMainWindow):
 
         self._set_dirty(True)
         self.refresh_model_page()
+        self.refresh_results_page()
         if self._queue_parallel:
             if not self._queue_pending:
                 self._finish_queue_training()
@@ -1959,6 +2768,39 @@ class AnalyticsWindow(QMainWindow):
             self.show_error("Import Error", error)
             return
 
+        sidecar_metrics = {}
+        sidecar_parameters = {}
+        sidecar_features = []
+        sidecar_evaluation = {}
+        sidecar_common = {}
+        sidecar_required = {}
+        sidecar_advanced = {}
+        sidecar_path = Path(path).with_suffix(".json")
+        if sidecar_path.exists():
+            try:
+                with open(sidecar_path, "r", encoding="utf-8") as handle:
+                    sidecar = json.load(handle)
+                sidecar_metrics = sidecar.get("metrics", {}) or {}
+                sidecar_parameters = sidecar.get("parameters", {}) or {}
+                sidecar_features = sidecar.get("feature_columns", []) or []
+                sidecar_common = sidecar.get("common_parameters", {}) or {}
+                sidecar_required = sidecar.get("required_parameters", {}) or {}
+                sidecar_advanced = sidecar.get("advanced_parameters", {}) or {}
+                sidecar_evaluation = {
+                    "confusion_matrix": sidecar.get("confusion_matrix"),
+                    "confusion_labels": sidecar.get("confusion_labels"),
+                    "cluster_summary": sidecar.get("cluster_summary"),
+                    "ssl_progress": sidecar.get("ssl_progress"),
+                }
+            except Exception:
+                sidecar_metrics = {}
+                sidecar_parameters = {}
+                sidecar_features = []
+                sidecar_evaluation = {}
+                sidecar_common = {}
+                sidecar_required = {}
+                sidecar_advanced = {}
+
         category, algorithm = self._infer_external_model_category_algorithm(imported)
         base_name = Path(path).stem
         existing_names = [item.get("name", "") for item in self.project.get("added_models", [])]
@@ -1980,7 +2822,17 @@ class AnalyticsWindow(QMainWindow):
         feature_columns = []
         if hasattr(imported, "feature_names_in_"):
             feature_columns = [str(col) for col in list(imported.feature_names_in_)]
+        if sidecar_features:
+            feature_columns = [str(col) for col in sidecar_features]
         entry["feature_columns"] = feature_columns
+        entry["metrics"] = sidecar_metrics
+        entry["evaluation"] = sidecar_evaluation
+        if sidecar_common:
+            entry["common_parameters"] = sidecar_common
+        if sidecar_required:
+            entry["required_parameters"] = sidecar_required
+        if sidecar_advanced:
+            entry["advanced_parameters"] = sidecar_advanced
         editable = bool(category and algorithm and self.project.get("label_column"))
         if editable and feature_columns and not self.working_df.empty:
             editable = all(column in self.working_df.columns for column in feature_columns)
@@ -1989,11 +2841,13 @@ class AnalyticsWindow(QMainWindow):
         self.project.setdefault("added_models", []).append(entry)
         self.project.setdefault("models", []).append({
             "display_name": name,
+            "category": fallback_category,
             "algorithm": algorithm or "external",
             "model": imported,
-            "parameters": {},
-            "metrics": {},
+            "parameters": sidecar_parameters,
+            "metrics": sidecar_metrics,
             "feature_columns": feature_columns,
+            "evaluation": sidecar_evaluation,
         })
 
         self._set_dirty(True)
