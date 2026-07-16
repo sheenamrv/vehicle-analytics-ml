@@ -14,21 +14,36 @@ MODEL_CATALOG: Dict[str, Dict[str, Dict[str, Any]]] = {
             },
             "advanced": {
                 "probability": {"type": "bool", "default": True},
-            },
+                "gamma": {"type": "choice", "default": "scale", "choices": ["scale", "auto"]},
+                "degree": {"type": "int", "default": 3, "min": 1, "max": 10, "step": 1},
+                "coef0": {"type": "float", "default": 0.0, "min": -10.0, "max": 10.0, "step": 0.1},
+                "shrinking": {"type": "bool", "default": True},
+                "tol": {"type": "float", "default": 0.001, "min": 0.000001, "max": 1.0, "step": 0.0001},
+            }
         },
         "knn": {
             "label": "K-Nearest Neighbors",
             "required": {
                 "n_neighbors": {"type": "int", "default": 5, "min": 1, "max": 1000, "step": 1},
             },
-            "advanced": {},
+            "advanced": {
+                "weights": {"type": "choice", "default": "uniform", "choices": ["uniform", "distance"]},
+                "algorithm": {"type": "choice", "default": "auto", "choices": ["auto", "ball_tree", "kd_tree", "brute"]},
+                "leaf_size": {"type": "int", "default": 30, "min": 1, "max": 200, "step": 1},
+                "p": {"type": "int", "default": 2, "min": 1, "max": 10, "step": 1},
+            },
         },
         "decision_tree": {
             "label": "Decision Tree",
             "required": {
                 "max_depth": {"type": "int", "default": 0, "min": 0, "max": 1000, "step": 1, "zero_as_none": True},
             },
-            "advanced": {},
+            "advanced": {
+                "criterion": {"type": "choice", "default": "gini", "choices": ["gini", "entropy", "log_loss"]},
+                "min_samples_split": {"type": "int", "default": 2, "min": 2, "max": 100, "step": 1},
+                "min_samples_leaf": {"type": "int", "default": 1, "min": 1, "max": 100, "step": 1},
+                "max_features": {"type": "choice", "default": None, "choices": [None, "sqrt", "log2"]},
+            },
         },
         "random_forest": {
             "label": "Random Forest",
@@ -36,7 +51,13 @@ MODEL_CATALOG: Dict[str, Dict[str, Dict[str, Any]]] = {
                 "n_estimators": {"type": "int", "default": 100, "min": 1, "max": 5000, "step": 1},
                 "max_depth": {"type": "int", "default": 0, "min": 0, "max": 1000, "step": 1, "zero_as_none": True},
             },
-            "advanced": {},
+            "advanced": {
+                "criterion": {"type": "choice", "default": "gini", "choices": ["gini", "entropy", "log_loss"]},
+                "min_samples_split": {"type": "int", "default": 2, "min": 2, "max": 100, "step": 1},
+                "min_samples_leaf": {"type": "int", "default": 1, "min": 1, "max": 100, "step": 1},
+                "max_features": {"type": "choice", "default": "sqrt", "choices": ["sqrt", "log2", None]},
+                "bootstrap": {"type": "bool", "default": True},
+            },
         },
         "logistic_regression": {
             "label": "Logistic Regression",
@@ -44,7 +65,11 @@ MODEL_CATALOG: Dict[str, Dict[str, Dict[str, Any]]] = {
                 "C": {"type": "float", "default": 1.0, "min": 0.001, "max": 100000.0, "step": 0.1},
                 "max_iter": {"type": "int", "default": 1000, "min": 100, "max": 100000, "step": 100},
             },
-            "advanced": {},
+            "advanced": {
+                "solver": {"type": "choice", "default": "lbfgs", "choices": ["lbfgs", "liblinear", "newton-cg", "newton-cholesky", "sag", "saga"]},
+                "penalty": {"type": "choice", "default": "l2", "choices": ["l1", "l2", "elasticnet", None]},
+                "tol": {"type": "float", "default": 0.0001, "min": 0.000001, "max": 1.0, "step": 0.0001},
+            },
         },
     },
     "semi_supervised": {
@@ -55,7 +80,10 @@ MODEL_CATALOG: Dict[str, Dict[str, Dict[str, Any]]] = {
                 "max_iter": {"type": "int", "default": 10, "min": 1, "max": 100, "step": 1},
                 "base_model_name": {"type": "text", "default": ""},
             },
-            "advanced": {},
+            "advanced": {
+                "criterion": {"type": "choice", "default": "threshold", "choices": ["threshold", "k_best"]},
+                "k_best": {"type": "int", "default": 10, "min": 1, "max": 1000, "step": 1},
+            },
         },
     },
     "unsupervised": {
@@ -66,6 +94,10 @@ MODEL_CATALOG: Dict[str, Dict[str, Dict[str, Any]]] = {
             },
             "advanced": {
                 "n_init": {"type": "int", "default": 10, "min": 1, "max": 500, "step": 1},
+                "init": {"type": "choice", "default": "k-means++", "choices": ["k-means++", "random"]},
+                "max_iter": {"type": "int", "default": 300, "min": 10, "max": 5000, "step": 10},
+                "tol": {"type": "float", "default": 0.0001, "min": 0.000001, "max": 1.0, "step": 0.0001},
+                "algorithm": {"type": "choice", "default": "lloyd", "choices": ["lloyd", "elkan"]},
             },
         },
         "dbscan": {
@@ -74,7 +106,11 @@ MODEL_CATALOG: Dict[str, Dict[str, Dict[str, Any]]] = {
                 "eps": {"type": "float", "default": 0.5, "min": 0.01, "max": 1000.0, "step": 0.1},
                 "min_samples": {"type": "int", "default": 5, "min": 1, "max": 1000, "step": 1},
             },
-            "advanced": {},
+            "advanced": {
+                "metric": {"type": "choice", "default": "euclidean", "choices": ["euclidean", "manhattan", "chebyshev", "minkowski", "cosine"]},
+                "algorithm": {"type": "choice", "default": "auto", "choices": ["auto", "ball_tree", "kd_tree", "brute"]},
+                "leaf_size": {"type": "int", "default": 30, "min": 1, "max": 200, "step": 1},
+            },
         },
         "hierarchical": {
             "label": "Hierarchical",
@@ -82,7 +118,10 @@ MODEL_CATALOG: Dict[str, Dict[str, Dict[str, Any]]] = {
                 "n_clusters": {"type": "int", "default": 3, "min": 2, "max": 100, "step": 1},
                 "linkage": {"type": "choice", "default": "ward", "choices": ["ward", "complete", "average", "single"]},
             },
-            "advanced": {},
+            "advanced": {
+                "metric": {"type": "choice", "default": "euclidean", "choices": ["euclidean", "manhattan", "cosine", "l1", "l2"]},
+                "compute_distances": {"type": "bool", "default": False},
+            }
         },
     },
 }

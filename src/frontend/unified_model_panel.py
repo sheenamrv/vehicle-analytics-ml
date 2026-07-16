@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import pandas as pd
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, Signal, QEvent, QRect
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QDialog,
     QAbstractItemView,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTableView,
+    QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
@@ -32,6 +33,109 @@ from src.frontend.widgets import (
     taller_dropdown,
 )
 from src.model.model_controller import COMMON_TRAINING_PARAMETERS, ModelController
+
+
+class BorderedCheckBox(QCheckBox):
+    """Checkbox with a thick border and explicit tick for readability."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setText("")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setMinimumSize(22, 22)
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        hint.setWidth(max(hint.width(), 22))
+        hint.setHeight(max(hint.height(), 22))
+        return hint
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        side = min(self.width(), self.height()) - 4
+        x = (self.width() - side) // 2
+        y = (self.height() - side) // 2
+        rect = QRect(x, y, side, side)
+
+        border_color = QColor("#1f7f43") if self.isChecked() else QColor("#6c7881")
+        painter.setPen(QPen(border_color, 2))
+        painter.setBrush(Qt.white)
+        painter.drawRoundedRect(rect, 4, 4)
+
+        if self.isChecked():
+            tick_pen = QPen(QColor("#1f7f43"), 2.5)
+            tick_pen.setCapStyle(Qt.RoundCap)
+            tick_pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(tick_pen)
+            left = rect.left()
+            top = rect.top()
+            width = rect.width()
+            height = rect.height()
+            painter.drawLine(left + int(width * 0.22), top + int(height * 0.56), left + int(width * 0.45), top + int(height * 0.78))
+            painter.drawLine(left + int(width * 0.45), top + int(height * 0.78), left + int(width * 0.80), top + int(height * 0.30))
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.toggle()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter):
+            self.toggle()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class AddedModelCheckDelegate(QStyledItemDelegate):
+    """Draw and toggle bold checkbox cells in the Added Models first column."""
+
+    def paint(self, painter, option, index):
+        checked = index.data(Qt.CheckStateRole) == Qt.Checked
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        side = min(option.rect.width(), option.rect.height()) - 8
+        side = max(side, 14)
+        x = option.rect.x() + (option.rect.width() - side) // 2
+        y = option.rect.y() + (option.rect.height() - side) // 2
+        box = QRect(x, y, side, side)
+
+        border_color = QColor("#1f7f43") if checked else QColor("#6c7881")
+        painter.setPen(QPen(border_color, 2))
+        painter.setBrush(Qt.white)
+        painter.drawRoundedRect(box, 3, 3)
+
+        if checked:
+            tick_pen = QPen(QColor("#1f7f43"), 2.3)
+            tick_pen.setCapStyle(Qt.RoundCap)
+            tick_pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(tick_pen)
+            left = box.left()
+            top = box.top()
+            width = box.width()
+            height = box.height()
+            painter.drawLine(left + int(width * 0.20), top + int(height * 0.56), left + int(width * 0.44), top + int(height * 0.78))
+            painter.drawLine(left + int(width * 0.44), top + int(height * 0.78), left + int(width * 0.82), top + int(height * 0.28))
+
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        del option
+        if event.type() == QEvent.MouseButtonRelease:
+            current = index.data(Qt.CheckStateRole)
+            next_state = Qt.Unchecked if current == Qt.Checked else Qt.Checked
+            return model.setData(index, next_state, Qt.CheckStateRole)
+        if event.type() == QEvent.KeyPress and event.key() in (Qt.Key_Space, Qt.Key_Select):
+            current = index.data(Qt.CheckStateRole)
+            next_state = Qt.Unchecked if current == Qt.Checked else Qt.Checked
+            return model.setData(index, next_state, Qt.CheckStateRole)
+        return False
 
 
 class AddedModelsTableModel(PandasTableModel):
@@ -50,7 +154,7 @@ class AddedModelsTableModel(PandasTableModel):
         flags = super().flags(index)
         if not index.isValid():
             return flags
-        if index.column() == 0:
+        if index.column() == 0 and self._is_row_selectable(index.row()):
             return flags | Qt.ItemIsUserCheckable | Qt.ItemIsEditable
         return flags
 
@@ -62,6 +166,8 @@ class AddedModelsTableModel(PandasTableModel):
             if role == Qt.CheckStateRole:
                 value = bool(self._data.iat[index.row(), index.column()])
                 return Qt.Checked if value else Qt.Unchecked
+            if role == Qt.TextAlignmentRole:
+                return Qt.AlignCenter
             if role in (Qt.DisplayRole, Qt.ToolTipRole):
                 return ""
             return None
@@ -80,6 +186,8 @@ class AddedModelsTableModel(PandasTableModel):
             return False
 
         if index.column() == 0 and role in (Qt.EditRole, Qt.CheckStateRole):
+            if not self._is_row_selectable(index.row()):
+                return False
             self._data.iat[index.row(), index.column()] = value == Qt.Checked if role == Qt.CheckStateRole else bool(value)
             self.dataChanged.emit(index, index)
             return True
@@ -91,6 +199,13 @@ class AddedModelsTableModel(PandasTableModel):
         if orientation == Qt.Horizontal and section == 0:
             return ""
         return super().headerData(section, orientation, role)
+
+    def _is_row_selectable(self, row):
+        if row < 0 or row >= len(self._data.index):
+            return False
+        if "selectable" not in self._data.columns:
+            return True
+        return bool(self._data.iloc[row].get("selectable", True))
 
 
 class QueueTableWidget(QTableWidget):
@@ -105,7 +220,7 @@ class QueueTableWidget(QTableWidget):
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
-        self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
         self.setDragDropOverwriteMode(False)
         self.setDefaultDropAction(Qt.MoveAction)
         self.setAlternatingRowColors(True)
@@ -141,8 +256,62 @@ class QueueTableWidget(QTableWidget):
         return names
 
     def dropEvent(self, event):
-        super().dropEvent(event)
+        if event.source() is not self:
+            event.ignore()
+            return
+
+        selected_rows = sorted({index.row() for index in self.selectionModel().selectedRows()})
+        if not selected_rows:
+            event.ignore()
+            return
+
+        drop_row = self._drop_row_from_event(event)
+        rows_payload = [self._row_payload(row) for row in selected_rows]
+
+        for row in reversed(selected_rows):
+            self.removeRow(row)
+
+        removed_before_drop = sum(1 for row in selected_rows if row < drop_row)
+        drop_row -= removed_before_drop
+
+        for offset, payload in enumerate(rows_payload):
+            target_row = drop_row + offset
+            self.insertRow(target_row)
+            for col, item in enumerate(payload):
+                self.setItem(target_row, col, item)
+
+        self.clearSelection()
+        for offset in range(len(rows_payload)):
+            self.selectRow(drop_row + offset)
+
+        event.accept()
         self.order_changed.emit(self.ordered_names())
+
+    def _drop_row_from_event(self, event):
+        indicator = self.dropIndicatorPosition()
+        if indicator == QAbstractItemView.OnViewport:
+            return self.rowCount()
+
+        point = event.position().toPoint()
+        row = self.rowAt(point.y())
+        if row < 0:
+            return self.rowCount()
+        if indicator == QAbstractItemView.BelowItem:
+            return row + 1
+        return row
+
+    def _row_payload(self, row):
+        payload = []
+        for col in range(self.columnCount()):
+            source = self.item(row, col)
+            if source is None:
+                payload.append(QTableWidgetItem(""))
+                continue
+            copied = QTableWidgetItem(source.text())
+            copied.setData(Qt.UserRole, source.data(Qt.UserRole))
+            copied.setFlags(source.flags())
+            payload.append(copied)
+        return payload
 
 
 class AdvancedParametersDialog(QDialog):
@@ -193,7 +362,7 @@ class AdvancedParametersDialog(QDialog):
             widget.addItems([str(item) for item in spec.get("choices", [])])
             return widget
         if kind == "bool":
-            return QCheckBox()
+            return BorderedCheckBox()
         return QLineEdit()
 
     def _set_control_value(self, control, value):
@@ -327,7 +496,7 @@ class UnifiedModelSidebar(QWidget):
                 control.setCurrentText(default)
             return control
         if control_type == "bool":
-            control = QCheckBox()
+            control = BorderedCheckBox()
             control.setChecked(bool(spec.get("default", False)))
             return control
         control = QLineEdit()
@@ -449,6 +618,8 @@ class UnifiedModelSidebar(QWidget):
                 control.setValue(value)
             elif isinstance(control, QComboBox):
                 control.setCurrentText(str(value))
+            elif isinstance(control, QCheckBox):
+                control.setChecked(bool(value))
             elif isinstance(control, QLineEdit):
                 control.setText(str(value))
 
@@ -485,6 +656,9 @@ class UnifiedModelPage(QWidget):
         self.added_table.horizontalHeader().setContextMenuPolicy(Qt.CustomContextMenu)
         self.added_table.horizontalHeader().customContextMenuRequested.connect(self._show_header_context_menu)
         self.added_table.horizontalHeader().setStretchLastSection(True)
+        self.added_table.verticalHeader().setVisible(True)
+        self.added_table.setAlternatingRowColors(True)
+        self.added_table.setItemDelegateForColumn(0, AddedModelCheckDelegate(self.added_table))
         layout.addWidget(self.added_table, 2)
 
         added_buttons = QHBoxLayout()
@@ -515,18 +689,24 @@ class UnifiedModelPage(QWidget):
         rows = []
         for model in models:
             is_trained = bool(model.get("trained"))
+            is_external = bool(model.get("externally_added"))
+            editable_external = bool(model.get("editable_external", True))
+            selectable = (not is_trained) and (not is_external or editable_external)
             rows.append({
-                "": not is_trained,
+                "": selectable,
                 "name": model.get("name", ""),
                 "category": model.get("category", ""),
                 "algorithm": model.get("algorithm", ""),
                 "label": model.get("label", ""),
                 "trained": "Yes" if is_trained else "No",
-                "external": "Yes" if model.get("externally_added") else "No",
+                "external": "Yes" if is_external else "No",
+                "selectable": selectable,
             })
-        self.added_model.set_data(pd.DataFrame(rows, columns=["", "name", "category", "algorithm", "label", "trained", "external"]))
+        self.added_model.set_data(pd.DataFrame(rows, columns=["", "name", "category", "algorithm", "label", "trained", "external", "selectable"]))
+        selectable_index = self.added_model._data.columns.get_loc("selectable")
+        self.added_table.setColumnHidden(selectable_index, True)
         if self.added_model._data.shape[1] > 0:
-            self.added_table.setColumnWidth(0, 36)
+            self.added_table.setColumnWidth(0, 34)
 
     def set_queue(self, rows):
         self.queue_table.set_rows(rows)
@@ -553,15 +733,6 @@ class UnifiedModelPage(QWidget):
 
     def _on_add_to_queue(self):
         names = self._selected_names(self.added_table, self.added_model)
-        if "" in self.added_model._data.columns and names:
-            for row in range(len(self.added_model._data.index)):
-                if str(self.added_model._data.iloc[row]["name"]) in set(names):
-                    self.added_model._data.iat[row, 0] = False
-            if self.added_model.rowCount() and self.added_model.columnCount():
-                self.added_model.dataChanged.emit(
-                    self.added_model.index(0, 0),
-                    self.added_model.index(self.added_model.rowCount() - 1, 0),
-                )
         self.queue_add_requested.emit(names)
 
     def _on_remove_from_queue(self):

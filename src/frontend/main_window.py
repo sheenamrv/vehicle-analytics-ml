@@ -8,6 +8,7 @@ from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QInputDialog,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -583,11 +585,21 @@ class AnalyticsWindow(QMainWindow):
         self.model_sidebar = UnifiedModelSidebar()
         self.model_sidebar.add_model_requested.connect(self.add_or_update_model_definition)
         self.model_sidebar.import_external_requested.connect(self.import_external_model)
-        self.sidebar_stack.addWidget(self.model_sidebar)
+        self.model_sidebar_scroll = self._scrollable_sidebar(self.model_sidebar)
+        self.sidebar_stack.addWidget(self.model_sidebar_scroll)
         self.sidebar_stack.addWidget(self._results_sidebar())
 
         self.on_top_tab_changed(0)
         self.on_workflow_tab_changed(0)
+
+    def _scrollable_sidebar(self, content):
+        scroll = QScrollArea()
+        scroll.setProperty("sidebarScroll", True)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+        return scroll
 
 # ============================================================================
 # Sidebar Construction
@@ -1081,7 +1093,7 @@ class AnalyticsWindow(QMainWindow):
             self.top_tabs["buttons"][index].setChecked(True)
             self.workflow_tab_container.setVisible(False)
             self.main_stack.setCurrentWidget(self.model_page)
-            self.sidebar_stack.setCurrentWidget(self.model_sidebar)
+            self.sidebar_stack.setCurrentWidget(self.model_sidebar_scroll)
             self.refresh_model_page()
             return
         if index == 2:
@@ -1699,9 +1711,31 @@ class AnalyticsWindow(QMainWindow):
             )
             if not path:
                 return
+            category = entry.get("category", "")
+            algorithm = entry.get("algorithm", "")
+            common_parameters = ModelController.default_common_parameters()
+            common_parameters.update(entry.get("common_parameters", {}))
+            required_parameters = ModelController.default_required_parameters(category, algorithm)
+            required_parameters.update(entry.get("required_parameters", {}))
+            advanced_parameters = ModelController.default_advanced_parameters(category, algorithm)
+            advanced_parameters.update(entry.get("advanced_parameters", {}))
+
+            export_payload = {
+                "name": entry.get("name", ""),
+                "category": category,
+                "algorithm": algorithm,
+                "label": entry.get("label", ""),
+                "trained": bool(entry.get("trained", False)),
+                "externally_added": bool(entry.get("externally_added", False)),
+                "editable_external": bool(entry.get("editable_external", True)),
+                "common_parameters": common_parameters,
+                "required_parameters": required_parameters,
+                "advanced_parameters": advanced_parameters,
+                "training_parameters": {**required_parameters, **advanced_parameters},
+            }
             try:
                 with open(path, "w", encoding="utf-8") as file:
-                    json.dump(entry, file, indent=2)
+                    json.dump(export_payload, file, indent=2)
             except Exception as error:
                 self.show_error("Export Error", error)
             return
