@@ -18,6 +18,7 @@ Path(os.environ["XDG_CACHE_HOME"]).mkdir(parents=True, exist_ok=True)
 import numpy as np
 import pandas as pd
 import matplotlib
+import seaborn as sns
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3D projection)
@@ -61,7 +62,8 @@ class ChartCanvas(FigureCanvasQTAgg):
             self.show_empty("Open a dataset to visualize it.")
             return
 
-        # Extension point: add new generic chart types to this dispatch.
+        # Extension point: add chart types here and update both the frontend
+        # column filtering and validation contract in main_window.py.
         if chart_type == "Histogram":
             self._histogram(df, x_col, bins=bins, show_mean_line=show_mean_line,
                             show_median_line=show_median_line, cmap=cmap)
@@ -156,6 +158,37 @@ class ChartCanvas(FigureCanvasQTAgg):
         self._style_axis(axis)
 
     def _single_axis(self, projection=None):
+    # def plot_model_comparison(self, metrics_df):
+    #     """Render comparable saved-model classification metrics."""
+    #     required = {"name", "accuracy", "precision", "recall", "f1"}
+    #     if metrics_df.empty or not required.issubset(metrics_df.columns):
+    #         self.show_empty("Train at least one model to compare evaluation metrics.")
+    #         return
+
+    #     # Long-form data lets Seaborn create one consistent metric group per
+    #     # model without manually calculating bar offsets.
+    #     plot_df = metrics_df[["name", "accuracy", "precision", "recall", "f1"]].melt(
+    #         id_vars="name",
+    #         value_vars=["accuracy", "precision", "recall", "f1"],
+    #         var_name="metric",
+    #         value_name="score",
+    #     ).dropna()
+    #     if plot_df.empty:
+    #         self.show_empty("No comparable classification metrics are available.")
+    #         return
+
+    #     axis = self._single_axis()
+    #     sns.barplot(data=plot_df, x="name", y="score", hue="metric", palette="Greens", ax=axis)
+    #     axis.set_title("Model Metrics Comparison")
+    #     axis.set_xlabel("Model")
+    #     axis.set_ylabel("Score")
+    #     axis.set_ylim(0, 1.05)
+    #     axis.tick_params(axis="x", rotation=25)
+    #     axis.legend(title="Metric", frameon=False, loc="best")
+    #     self._style_axis(axis)
+    #     self.draw()
+
+    # def _single_axis(self):
         """Reset the figure and return a fresh axis for single-chart canvases."""
         self.figure.clear()
         if projection:
@@ -217,7 +250,7 @@ class ChartCanvas(FigureCanvasQTAgg):
                 frameon=False,
             )
         else:
-            axis.scatter(plot_df[x_col], plot_df[y_col], color="#36b66b", alpha=0.78, s=34)
+            sns.scatterplot(data=plot_df, x=x_col, y=y_col, color="#36b66b", alpha=0.78, s=48, ax=axis)
 
         axis.set_title(f"{y_col} vs {x_col}")
         axis.set_xlabel(x_col)
@@ -463,7 +496,7 @@ class ChartCanvas(FigureCanvasQTAgg):
 
         # Keep categorical labels readable; show top groups only.
         values = values.head(20)
-        axis.bar(values.index.astype(str), values.values, color="#36b66b")
+        sns.barplot(x=values.index.astype(str), y=values.values, color="#36b66b", ax=axis)
         axis.set_title(title)
         axis.set_xlabel(category_col)
         axis.set_ylabel(ylabel)
@@ -484,22 +517,8 @@ class ChartCanvas(FigureCanvasQTAgg):
             self.show_empty("The selected columns do not contain plottable values.")
             return
 
-        groups = []
-        labels = []
-        for label, group in plot_df.groupby(group_col, dropna=False):
-            groups.append(group[value_col].to_numpy())
-            labels.append(str(label))
-            # More groups make box labels unreadable in this fixed panel.
-            if len(groups) >= 12:
-                break
-
-        axis.boxplot(
-            groups,
-            labels=labels,
-            patch_artist=True,
-            boxprops={"facecolor": "#ccebd9", "edgecolor": "#1f7f43"},
-            medianprops={"color": "#1f7f43", "linewidth": 2},
-        )
+        top_groups = plot_df[group_col].value_counts().head(12).index
+        sns.boxplot(data=plot_df[plot_df[group_col].isin(top_groups)], x=group_col, y=value_col, color="#9ad6af", ax=axis)
         axis.set_title(f"{value_col} by {group_col}")
         axis.set_xlabel(group_col)
         axis.set_ylabel(value_col)

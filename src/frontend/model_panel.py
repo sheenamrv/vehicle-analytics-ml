@@ -1,10 +1,19 @@
+import pandas as pd
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QComboBox,
     QDoubleSpinBox,
+    QFormLayout,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QProgressBar,
     QSpinBox,
-    QStackedWidget,
+    QTableView,
     QVBoxLayout,
     QWidget,
+    QStackedWidget,
 )
 
 '''

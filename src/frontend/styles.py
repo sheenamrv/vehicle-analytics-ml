@@ -128,8 +128,33 @@ def apply_app_styles(window):
         }}
         QCheckBox {{
             color: {MUTED};
-            font-size: 11px;
+            font-size: 12px;
+            font-weight: 600;
             spacing: 7px;
+        }}
+        QScrollArea[sidebarScroll="true"] {{
+            background: white;
+            border-right: 1px solid #eceef1;
+        }}
+        QScrollArea[sidebarScroll="true"] QScrollBar:vertical {{
+            width: 8px;
+            background: transparent;
+            margin: 6px 2px 6px 2px;
+        }}
+        QScrollArea[sidebarScroll="true"] QScrollBar::handle:vertical {{
+            background: #c3ccd2;
+            border-radius: 4px;
+            min-height: 24px;
+        }}
+        QScrollArea[sidebarScroll="true"] QScrollBar::handle:vertical:hover {{
+            background: #aab5bc;
+        }}
+        QScrollArea[sidebarScroll="true"] QScrollBar::add-line:vertical,
+        QScrollArea[sidebarScroll="true"] QScrollBar::sub-line:vertical,
+        QScrollArea[sidebarScroll="true"] QScrollBar::add-page:vertical,
+        QScrollArea[sidebarScroll="true"] QScrollBar::sub-page:vertical {{
+            height: 0px;
+            background: transparent;
         }}
         QSlider::groove:horizontal {{
             height: 5px;

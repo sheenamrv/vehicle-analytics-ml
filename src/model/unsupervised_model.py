@@ -40,7 +40,7 @@ def run_hierarchical(X_scaled, n_clusters=3, linkage="ward"):
     labels = fit_predict_model(model, X_scaled)
     return model, labels
 
-
+# do not alter
 def run_unsupervised_workflow(
     df,
     method,
