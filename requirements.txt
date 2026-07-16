@@ -11,3 +11,4 @@ mrmr-selection
 streamlit
 pyinstaller
 pyarrow
+seaborn

@@ -153,7 +153,7 @@ def evaluate_ssl_model(
 
     return result
 
-
+# do not alter
 # Full SSL workflow function
 # - Gets numeric features if no custom features are provided
 # - Trains the SSL model

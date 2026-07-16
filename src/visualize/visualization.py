@@ -2,6 +2,13 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
+def export_plot_image(fig, path):
+    # Ensure the latest interactive canvas state is flushed before export.
+    if getattr(fig, "canvas", None) is not None:
+        fig.canvas.draw()
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+
+
 def create_visualization(df):
 
     print("\nVisualization Types")

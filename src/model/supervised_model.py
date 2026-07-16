@@ -4,6 +4,7 @@ from src.model.model_utils import get_rf_config, prepare_training_data
 from src.model.result_builders import build_classification_results
 
 # Return model parameters. If parameters is None, this falls back to the old CLI prompts
+# change param to config and advanced
 def get_model_parameters(model_type, parameters=None):
     if parameters is not None:
         return parameters
@@ -33,7 +34,7 @@ def get_model_parameters(model_type, parameters=None):
 
     return {}
 
-
+# do not alter
 def run_supervised_workflow(
     df,
     label_col,

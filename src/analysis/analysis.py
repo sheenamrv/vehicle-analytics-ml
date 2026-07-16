@@ -23,14 +23,14 @@ from src.model.model_utils import (
 # PCA Analysis
 # Parameters include the dataset received from previous stage: ______,
 # feature columns, label column and n_components
-def pca_analysis(df, features, label, n_components=2, fill_method="median", fill_value=None):
+def pca_analysis(df, features, label=None, n_components=2, fill_method="median", fill_value=None):
     X = prepare_training_features(
         df=df,
         features=features,
         fill_method=fill_method,
         fill_value=fill_value,
     )
-    y = df[label]  # PCA does not use labels -> keep for later
+    y = df[label] if label and label in df.columns else pd.Series(index=df.index, dtype="float64")
 
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
@@ -47,8 +47,8 @@ def pca_analysis(df, features, label, n_components=2, fill_method="median", fill
 
     pca_df = pd.DataFrame(pca_data, columns=columns)
 
-    # Add labels
-    pca_df[label] = y.values
+    if label and label in df.columns:
+        pca_df[label] = y.values
 
     result = {
         "pca_df": pca_df,
@@ -70,7 +70,7 @@ def pca_analysis(df, features, label, n_components=2, fill_method="median", fill
 
 
 # Correlation Analysis (feature to feature correlation)
-def correlation_analysis(df, label):
+def correlation_analysis(df, label=None):
     feature_columns = get_num_feature_columns(df, label)
 
     if len(feature_columns) == 0:
@@ -82,14 +82,17 @@ def correlation_analysis(df, label):
 
 
 # Mutual Information Analysis
-def mutual_information_analysis(df, features, label, fill_method="median", fill_value=None):
+def mutual_information_analysis(df, features, label=None, fill_method="median", fill_value=None):
     X = prepare_training_features(
         df=df,
         features=features,
         fill_method=fill_method,
         fill_value=fill_value,
     )
-    y = df[label]
+    if label and label in df.columns:
+        y = df[label]
+    else:
+        y = pd.Series(range(len(df)), index=df.index)
 
     # Calculate the Mutual Information scores
     mi_scores = mutual_info_classif(X, y, random_state=42)
@@ -103,14 +106,17 @@ def mutual_information_analysis(df, features, label, fill_method="median", fill_
 
 
 # mRMR (minimum Redundancy - Maximum Relevance) Analysis
-def mrmr_analysis(df, features, label, K=10, fill_method="median", fill_value=None):
+def mrmr_analysis(df, features, label=None, K=10, fill_method="median", fill_value=None):
     X = prepare_training_features(
         df=df,
         features=features,
         fill_method=fill_method,
         fill_value=fill_value,
     )
-    y = df[label]
+    if label and label in df.columns:
+        y = df[label]
+    else:
+        y = pd.Series(range(len(df)), index=df.index)
 
     # Take the smaller value for number of top features
     K = min(K, len(X.columns))
