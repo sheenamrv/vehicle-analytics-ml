@@ -1,24 +1,24 @@
 # Interactive Machine Learning Application
 
-A desktop machine learning application for vehicle analytics built with Python and PySide6.
+A desktop machine learning application for vehicle analytics built with **Python** and **PySide6**.
 
----
+## Project Resources
 
-# Project Resources
+### Figma Design
 
-## Figma Design
 View the project design here:
+
 **[Figma Design](https://www.figma.com/design/PT2GGS6hPYO4dnTnLpy49s/BISI-Capstone-UI-Design-2026?node-id=0-1&t=77XuAQU0iZNhR8yk-1)**
 
-## Figma Prototype
+### Figma Prototype
+
 View the interactive prototype here:
+
 **[Figma Prototype](https://www.figma.com/proto/PT2GGS6hPYO4dnTnLpy49s/BISI-Capstone-UI-Design-2026?node-id=0-1&t=77XuAQU0iZNhR8yk-1)**
 
----
+## Local Development Setup
 
-# Local Development Setup
-
-## 1. Create a Virtual Environment
+### 1. Create a Virtual Environment
 
 If you do not already have a virtual environment, create one:
 
@@ -26,48 +26,40 @@ If you do not already have a virtual environment, create one:
 python -m venv venv
 ```
 
----
+### 2. Activate the Virtual Environment
 
-## 2. Activate the Virtual Environment
-
-### Windows (PowerShell)
+**Windows (PowerShell)**
 
 ```powershell
 venv\Scripts\Activate
 ```
 
----
-
-## 3. Install Dependencies
+### 3. Install Dependencies
 
 Only run this if:
 
-- Setting up the project for the first time
-- New packages have been added to `requirements.txt`
+- You are setting up the project for the first time.
+- New packages have been added to `requirements.txt`.
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
-
-## 4. Select the Correct Python Interpreter
+### 4. Select the Correct Python Interpreter
 
 In **Visual Studio Code**:
 
-1. Press **Ctrl + Shift + P**
-2. Search for **Python: Select Interpreter**
+1. Press **Ctrl + Shift + P**.
+2. Search for **Python: Select Interpreter**.
 3. Select:
 
-```
+```text
 venv\Scripts\python.exe
 ```
 
----
+## Running the Project
 
-# Running the Project
-
-## Run Individual Python Scripts
+### Run Individual Python Scripts
 
 ```bash
 python <script_name>.py
@@ -79,29 +71,16 @@ Example:
 python app.py
 ```
 
----
-
-## Run the PySide6 Desktop Application
-
-```bash
-python app.py
-```
-
----
-
-## Run the Main Application
+### Run the Main Application
 
 ```bash
 python run.py
 ```
 
----
-
-# Building the Executable
+## Building the Executable
 
 Once the application has been tested and is working correctly, build the executable using:
 
 ```bash
 pyinstaller --onedir --windowed run.py
 ```
-
