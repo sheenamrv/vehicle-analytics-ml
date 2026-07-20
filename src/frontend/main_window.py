@@ -74,6 +74,8 @@ from src.frontend.unified_model_panel import (
     UnifiedModelPage,
     UnifiedModelSidebar,
 )
+from src.playback_annotation.playback_annotation import PlaybackAnnotationManager
+from src.frontend.playback_page import PlaybackAnnotationPage, PlaybackSidebar
 from src.frontend.styles import apply_app_styles
 from src.frontend.table_model import PandasTableModel
 from src.visualize.visualization import export_plot_image
@@ -784,6 +786,16 @@ class AnalyticsWindow(QMainWindow):
         self._build_models_page()
         self._build_results_page()
 
+        # Playback/annotation
+        # always reads the current working dataset
+        self.playback_sidebar = PlaybackSidebar()
+        self.playback_page = PlaybackAnnotationPage(
+            self.playback_sidebar,
+            self._active_realtime_dataset,
+            self,
+        )
+        self.main_stack.addWidget(self.playback_page)
+
         self.sidebar_stack.addWidget(self._import_sidebar())
         self.sidebar_stack.addWidget(self._feature_sidebar())
         self.sidebar_stack.addWidget(self._analysis_sidebar())
@@ -794,7 +806,9 @@ class AnalyticsWindow(QMainWindow):
         self.model_sidebar.import_external_requested.connect(self.import_external_model)
         self.model_sidebar_scroll = self._scrollable_sidebar(self.model_sidebar)
         self.sidebar_stack.addWidget(self.model_sidebar_scroll)
-        self.sidebar_stack.addWidget(self._results_sidebar())
+        self.results_sidebar = self._results_sidebar()
+        self.sidebar_stack.addWidget(self.results_sidebar)
+        self.sidebar_stack.addWidget(self.playback_sidebar)
 
         self.on_top_tab_changed(0)
         self.on_workflow_tab_changed(0)
@@ -1507,50 +1521,47 @@ class AnalyticsWindow(QMainWindow):
 # ============================================================================
 
     def on_top_tab_changed(self, index):
-        # if index == 0:
-        #     self.top_tabs["buttons"][0].setChecked(True)
-        #     self.workflow_tabs_container.setVisible(True)
-        #     current_workflow = 0
-        #     for i, button in enumerate(self.workflow_tabs["buttons"]):
-        #         if button.isChecked():
-        #             current_workflow = i
-        #             break
-        #     self.on_workflow_tab_changed(current_workflow)
-        # elif index == 1:
-        #     self.top_tabs["buttons"][1].setChecked(True)
-        #     self.workflow_tabs_container.setVisible(False)
-        #     self.main_stack.setCurrentIndex(4)
-        #     self.sidebar_stack.setCurrentIndex(4)
-        #     self.refresh_models_list()
-        # else:
+        if index < 0 or index >= len(self.top_tabs["buttons"]):
+            return
+
+        # Check only the selected top navigation button
+        for button_index, button in enumerate(self.top_tabs["buttons"]):
+            button.setChecked(button_index == index)
+
+        # Data & Features
+        if index == 0:
+            self.workflow_tab_container.setVisible(True)
+
+            workflow_index = self.workflow_tabs["group"].checkedId()
+            if workflow_index < 0:
+                workflow_index = 0
+
+            self.on_workflow_tab_changed(workflow_index)
+            return
+
+        # Models, Results, and Playback do not use the workflow subtabs
+        self.workflow_tab_container.setVisible(False)
+
+        # Models
         if index == 1:
-            self.top_tabs["buttons"][index].setChecked(True)
-            self.workflow_tab_container.setVisible(False)
             self.main_stack.setCurrentWidget(self.model_page)
             self.sidebar_stack.setCurrentWidget(self.model_sidebar_scroll)
             self.refresh_model_page()
             return
+
+        # Results
         if index == 2:
-            self.top_tabs["buttons"][index].setChecked(True)
-            self.workflow_tab_container.setVisible(False)
             self.main_stack.setCurrentWidget(self.results_page)
-            self.sidebar_stack.setCurrentIndex(5)
+            self.sidebar_stack.setCurrentWidget(self.results_sidebar)
             self.refresh_results_page()
             return
-        if index != 0:
-            QMessageBox.information(
-                self,
-                "Coming Soon",
-                "This section is ready in the shell and will be connected as result workflows are added.",
-            )
-            # self.top_tabs["buttons"][0].setChecked(True)
-            # self.workflow_tabs_container.setVisible(True)
-            self.top_tabs["buttons"][0].setChecked(True)
+
+        # Playback & Annotation
+        if index == 3:
+            self.main_stack.setCurrentWidget(self.playback_page)
+            self.sidebar_stack.setCurrentWidget(self.playback_sidebar)
+            self.refresh_realtime_dataset()
             return
-        
-        self.top_tabs["buttons"][index].setChecked(True)
-        self.workflow_tab_container.setVisible(True)
-        self.on_workflow_tab_changed(self.workflow_tabs["group"].checkedId())
 
     # ============================================================================
     # Models
@@ -1699,10 +1710,16 @@ class AnalyticsWindow(QMainWindow):
         # self.on_workflow_tab_changed(self.workflow_tabs["group"].checkedId())
 
     def on_workflow_tab_changed(self, index):
-        """Switch the visible sidebar/page pair for the selected workflow tab."""
-        self.workflow_tabs["buttons"][index].setChecked(True)
+        """Switch the Data & Features workflow page and sidebar."""
+        if index < 0 or index >= len(self.workflow_tabs["buttons"]):
+            return
+
+        for button_index, button in enumerate(self.workflow_tabs["buttons"]):
+            button.setChecked(button_index == index)
+
         self.main_stack.setCurrentIndex(index)
         self.sidebar_stack.setCurrentIndex(index)
+
         if index == 3:
             self.refresh_visualization_summary()
             self.render_visualization()
@@ -2560,6 +2577,7 @@ class AnalyticsWindow(QMainWindow):
 
         self.populate_column_controls()
         self.refresh_import_tables()
+        self.refresh_realtime_dataset()
 
     def _refresh_label_combo(self):
         active_columns = list(self.working_df.columns) if not self.working_df.empty else list(self.og_df.columns if not self.og_df.empty else self.columns)
@@ -2804,6 +2822,7 @@ class AnalyticsWindow(QMainWindow):
 
         self.refresh_import_tables()
         self.populate_visualization_controls()
+        self.refresh_realtime_dataset()
 
     def apply_selected_preprocessing(self):
         """Apply one existing preprocessing operation to the checked project columns."""
@@ -2854,6 +2873,8 @@ class AnalyticsWindow(QMainWindow):
         if hasattr(self, "model_page"):
             self.unified_model_page.set_added_models([])
             self.unified_model_page.set_queue([])
+        if hasattr(self, "playback_page"):
+            self.playback_page.reset()
 
     # ============================================================================
     # Supervised Models
@@ -3455,6 +3476,7 @@ class AnalyticsWindow(QMainWindow):
             self.working_df = df.drop(index=dialog.removed_indices)
             self._set_dirty(True)
             self.refresh_import_tables()
+            self.refresh_realtime_dataset()
 
     def on_summary_selection_changed(self, selected, deselected):
         if not selected.indexes():
@@ -4587,6 +4609,17 @@ class AnalyticsWindow(QMainWindow):
             self.show_error("Export Error", error)
             return
         QMessageBox.information(self, "Export Complete", f"Saved {path}")
+
+    # For Playback, ML Prediction, and Annotation
+    
+    # Return the active imported dataset 
+    def _active_realtime_dataset(self):
+        return PlaybackAnnotationManager.active_dataset(self.working_df, self.og_df)
+
+    # Synchronize the playback page with the current imported dataset
+    def refresh_realtime_dataset(self):
+        if hasattr(self, "playback_page"):
+            self.playback_page.sync_dataset()
 
     # ============================================================================
     # Utility Functions

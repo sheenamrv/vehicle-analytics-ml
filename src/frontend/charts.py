@@ -614,14 +614,51 @@ class ChartCanvas(FigureCanvasQTAgg):
         axis.grid(True, color="#e5e7eb", linewidth=0.8)
         axis.spines["top"].set_visible(False)
         axis.spines["right"].set_visible(False)
+        
+    
+    # For Playback functionality
+    def plot_realtime_signal(self, df, column, current_row=None):
+        if (
+            df.empty
+            or column not in df.columns
+            or not pd.api.types.is_numeric_dtype(df[column])
+        ):
+            self.show_empty("No numeric signal available.")
+            return
 
+        axis = self._single_axis()
+        plot_df = (
+            df[[column]]
+            .replace([np.inf, -np.inf], np.nan)
+            .dropna()
+        )
 
-def plt_colormap(n, cmap="tab10"):
-    """Return n visually distinct colors for overlay-style charts."""
-    try:
-        cmap_obj = matplotlib.colormaps[cmap if cmap else "tab10"]
-    except Exception:
-        cmap_obj = matplotlib.colormaps["tab10"]
-    if n <= 1:
-        return [cmap_obj(0.5)]
-    return [cmap_obj(i / max(n - 1, 1)) for i in range(n)]
+        if plot_df.empty:
+            self.show_empty("No plottable values in this signal window.")
+            return
+
+        axis.plot(plot_df.index, plot_df[column], linewidth=1.8)
+
+        if current_row is not None and current_row in plot_df.index:
+            axis.axvline(
+                current_row,
+                linestyle="--",
+                linewidth=1.2,
+            )
+
+        axis.set_title(str(column))
+        axis.set_xlabel("row / time")
+        axis.set_ylabel("value")
+        self._style_axis(axis)
+        self.draw()
+
+    def plt_colormap(n, cmap="tab10"):
+        """Return n visually distinct colors for overlay-style charts."""
+        try:
+            cmap_obj = matplotlib.colormaps[cmap if cmap else "tab10"]
+        except Exception:
+            cmap_obj = matplotlib.colormaps["tab10"]
+        if n <= 1:
+            return [cmap_obj(0.5)]
+        return [cmap_obj(i / max(n - 1, 1)) for i in range(n)]
+
