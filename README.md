@@ -93,3 +93,5 @@ Once the application has been tested and is working correctly, build the executa
 ```bash
 pyinstaller --onedir --windowed run.py
 ```
+
+If you choose to build the application make sure the venv is activated. One built it will appear in the following folder; dist/run with the exe file included.
