@@ -48,7 +48,7 @@ def apply_app_styles(window):
             color: {TEXT};
             font-size: 12px;
         }}
-        QLineEdit, QSpinBox {{
+        QLineEdit, QSpinBox, QDoubleSpinBox {{
             min-height: 26px;
             border: 1px solid {BORDER};
             border-radius: 4px;
@@ -61,6 +61,7 @@ def apply_app_styles(window):
             min-height: 28px;
             padding: 5px 12px;
             font-weight: 600;
+            text-align: center;
         }}
         QPushButton[primary="true"] {{
             background: {GREEN};
