@@ -275,6 +275,10 @@ class UnifiedModelTrainingWorker(QRunnable):
                     pretrained_model=base_model_info["model"],
                     threshold=float(parameters.get("threshold", 0.9)),
                     max_iter=int(parameters.get("max_iter", 10)),
+                    criterion=parameters.get("criterion", "threshold"),
+                    k_best=int(parameters.get("k_best", 10)),
+                    test_size=float(common.get("test_size", 0.3)),
+                    random_state=int(common.get("random_state", 42)),
                     verbose=bool(common.get("verbose", False)),
                 )
                 payload = {
@@ -2031,19 +2035,27 @@ class AnalyticsWindow(QMainWindow):
         model_obj = record.get("model")
         label_col = self.project.get("label_column")
         feature_columns = record.get("feature_columns", [])
+        category = record.get("category", "supervised")
+        if category == "unsupervised":
+            return context
         if model_obj is None or not label_col:
             return context
         if label_col not in self.working_df.columns:
             return context
 
         try:
-            X_raw, y_values = prepare_training_data(
-                df=self.working_df,
-                label_col=label_col,
-                features=feature_columns if feature_columns else None,
-            )
-            expected = list(feature_columns) if feature_columns else list(X_raw.columns)
-            X = align_features(X_raw, expected, fill_value=0)
+            if category == "semi_supervised" or hasattr(model_obj, "features"):
+                expected = list(feature_columns) if feature_columns else [c for c in self.working_df.columns if c != label_col]
+                X = self.working_df[expected].copy()
+                y_values = self.working_df[label_col].copy()
+            else:
+                X_raw, y_values = prepare_training_data(
+                    df=self.working_df,
+                    label_col=label_col,
+                    features=feature_columns if feature_columns else None,
+                )
+                expected = list(feature_columns) if feature_columns else list(X_raw.columns)
+                X = align_features(X_raw, expected, fill_value=0)
         except Exception:
             return context
 

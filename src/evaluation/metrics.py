@@ -1,5 +1,7 @@
 # Please add any functions for evaluating the model/ metrics
 
+import numpy as np
+
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -26,19 +28,36 @@ def classification_confusion_matrix(y_true, y_pred):
 
 
 def clustering_metrics(X, cluster_labels):
-    real_clusters = set(cluster_labels) - {-1}
+    labels = np.asarray(cluster_labels)
+    non_noise_mask = labels != -1
+    filtered_labels = labels[non_noise_mask]
+    filtered_X = np.asarray(X)[non_noise_mask]
+    unique_clusters = np.unique(filtered_labels)
 
-    if len(real_clusters) < 2:
+    if len(unique_clusters) < 2 or len(filtered_labels) <= len(unique_clusters):
         return {
             "silhouette_score": None,
             "davies_bouldin_score": None,
             "calinski_harabasz_score": None,
-            "note": "Clustering metrics require at least 2 non-noise clusters."
+            "noise_count": int((labels == -1).sum()),
+            "cluster_count": int(len(unique_clusters)),
+            "note": "Clustering metrics require at least 2 non-noise clusters with enough samples.",
         }
 
+    try:
+        silhouette = silhouette_score(filtered_X, filtered_labels)
+        davies = davies_bouldin_score(filtered_X, filtered_labels)
+        calinski = calinski_harabasz_score(filtered_X, filtered_labels)
+        note = None
+    except ValueError as error:
+        silhouette = davies = calinski = None
+        note = str(error)
+
     return {
-        "silhouette_score": silhouette_score(X, cluster_labels),
-        "davies_bouldin_score": davies_bouldin_score(X, cluster_labels),
-        "calinski_harabasz_score": calinski_harabasz_score(X, cluster_labels),
-        "note": None
+        "silhouette_score": silhouette,
+        "davies_bouldin_score": davies,
+        "calinski_harabasz_score": calinski,
+        "noise_count": int((labels == -1).sum()),
+        "cluster_count": int(len(unique_clusters)),
+        "note": note,
     }

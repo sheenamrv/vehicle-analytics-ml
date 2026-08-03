@@ -93,28 +93,54 @@ def evaluate_cluster_labels(X, cluster_labels):
     return clustering_metrics(X, cluster_labels)
 
 # Evaluate selected saved models on a df and return results
+#safely skips clustering artifacts
 def evaluate_saved_models(models, df, label_col, fill_method="median", fill_value=None):
     
-    X, y = prepare_training_data(
-        df=df,
-        label_col=label_col,
-        fill_method=fill_method,
-        fill_value=fill_value,
-    )
+    if label_col not in df.columns:
+        raise ValueError(f"Label column not found: {label_col}")
+    if df[label_col].isna().any():
+        raise ValueError("Saved-model evaluation requires known labels for every evaluated row.")
 
     results = []
-    
     for model_info in models:
-        X_test = align_features(X, model_info["feature_columns"], fill_value=0)
-        predictions = predict_model(model_info["model"], X_test)
-        evaluation = evaluate_classifier_predictions(y, predictions)
+        category = model_info.get("category", "supervised")
+        if category == "unsupervised":
+            results.append({
+                "name": model_info.get("display_name", "Unnamed model"),
+                "category": category,
+                "metrics": model_info.get("metrics", {}),
+                "confusion_matrix": None,
+                "predictions": None,
+                "note": "Clustering models are not evaluated as classifiers on labeled test data.",
+            })
+            continue
+
+        features = model_info.get("feature_columns") or [column for column in df.columns if column != label_col]
+        missing = [column for column in features if column not in df.columns]
+        if missing:
+            raise ValueError(f"Feature columns not found for {model_info.get('display_name')}: {missing}")
+
+        model = model_info["model"]
+        # SSL bundles own their fitted imputer/scaler; ordinary models use shared preparation.
+        if category == "semi_supervised" or hasattr(model, "features"):
+            X_test = df[features].copy()
+        else:
+            X, _ = prepare_training_data(
+                df=df, label_col=label_col, features=features,
+                fill_method=fill_method, fill_value=fill_value,
+            )
+            X_test = align_features(X, features, fill_value=0)
+
+        predictions = predict_model(model, X_test)
+        evaluation = evaluate_classifier_predictions(df[label_col], predictions)
         results.append({
-            "name": model_info["display_name"],
+            "name": model_info.get("display_name", "Unnamed model"),
+            "category": category,
             "metrics": evaluation["metrics"],
             "confusion_matrix": evaluation["confusion_matrix"],
             "predictions": evaluation["predictions"],
+            "note": None,
         })
-
     return results
 
 def train_queue():
@@ -204,4 +230,3 @@ def display_test_results(results):
         for r in results:
             print(f"\n{r['name']}")
             print(r["predictions"][:20])
-

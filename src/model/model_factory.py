@@ -93,24 +93,34 @@ def build_model(model_type, parameters=None, random_state=42):
 # Build unsupervised model
 def build_clusterer(method, parameters=None, random_state=42):
     parameters = parameters or {}
+    method = str(method).strip().lower()
 
     if method == "kmeans":
         return KMeans(
-            n_clusters=parameters.get("n_clusters", 3),
+            n_clusters=int(parameters.get("n_clusters", 3)),
+            init=parameters.get("init", "k-means++"),
+            n_init=int(parameters.get("n_init", 10)),
+            max_iter=int(parameters.get("max_iter", 300)),
+            tol=float(parameters.get("tol", 0.0001)),
+            algorithm=parameters.get("algorithm", "lloyd"),
             random_state=random_state,
-            n_init=parameters.get("n_init", 10),
         )
 
     if method == "dbscan":
         return DBSCAN(
-            eps=parameters.get("eps", 0.5),
-            min_samples=parameters.get("min_samples", 5),
+            eps=float(parameters.get("eps", 0.5)),
+            min_samples=int(parameters.get("min_samples", 5)),
+            metric=parameters.get("metric", "euclidean"),
+            algorithm=parameters.get("algorithm", "auto"),
+            leaf_size=int(parameters.get("leaf_size", 30)),
         )
 
     if method == "hierarchical":
         return AgglomerativeClustering(
-            n_clusters=parameters.get("n_clusters", 3),
+            n_clusters=int(parameters.get("n_clusters", 3)),
             linkage=parameters.get("linkage", "ward"),
+            metric=parameters.get("metric", "euclidean"),
+            compute_distances=bool(parameters.get("compute_distances", False)),
         )
 
     raise ValueError(f"Unsupported clustering method: {method}")
@@ -127,4 +137,3 @@ def get_model_category():
         for algorithm in definitions.keys():
             categories[algorithm] = category
     return categories
-

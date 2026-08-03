@@ -31,7 +31,9 @@ def build_classification_results(model, X_test, y_test, predictions, feature_col
 
 def create_cluster_summary(cluster_labels):
     counts = pd.Series(cluster_labels).value_counts().sort_index()
-    return pd.DataFrame({"cluster": counts.index, "count": counts.values})
+    frame = pd.DataFrame({"cluster": counts.index, "count": counts.values})
+    frame["description"] = frame["cluster"].apply(lambda value: "Noise" if value == -1 else f"Cluster {value}")
+    return frame
 
 
 def create_clustered_dataframe(df, cluster_labels):
@@ -40,18 +42,26 @@ def create_clustered_dataframe(df, cluster_labels):
     return clustered_df
 
 
-def create_pca_cluster_data(X_scaled, cluster_labels):
-    pca = PCA(n_components=2)
+def create_pca_cluster_data(X_scaled, cluster_labels, n_components=2):
+    max_components = min(X_scaled.shape[0], X_scaled.shape[1])
+    if max_components < 1:
+        raise ValueError("PCA requires at least one row and one feature.")
+    actual_components = min(int(n_components), max_components)
+    pca = PCA(n_components=actual_components)
     pca_data = pca.fit_transform(X_scaled)
+    pc2 = pca_data[:, 1] if actual_components >= 2 else np.zeros(len(pca_data))
     pca_df = pd.DataFrame({
         "PC1": pca_data[:, 0],
-        "PC2": pca_data[:, 1],
-        "cluster": cluster_labels.astype(str),
+        "PC2": pc2,
+        "cluster": np.asarray(cluster_labels).astype(str),
     })
     return {
         "pca_df": pca_df,
+        "pca": pca,
+        "requested_components": int(n_components),
+        "actual_components": actual_components,
         "explained_variance_ratio": pca.explained_variance_ratio_,
-        "explained_variance_sum": pca.explained_variance_ratio_.sum(),
+        "explained_variance_sum": float(pca.explained_variance_ratio_.sum()),
     }
 
 
