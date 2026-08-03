@@ -1,6 +1,9 @@
+import html
+
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -9,6 +12,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -29,9 +33,11 @@ class ColumnPicker(QWidget):
 
     selectionChange = Signal()
 
-    def __init__(self, empty_text):
+    def __init__(self, empty_text, rich_feature_labels=False):
         super().__init__()
         self.checkboxes = {}
+        self.item_widgets = {}
+        self.rich_feature_labels = rich_feature_labels
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -46,7 +52,12 @@ class ColumnPicker(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.scroll.setFixedWidth(SIDEBAR_WIDTH - 52)
         self.list_widget = QWidget()
+        self.list_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         self.list_layout = QVBoxLayout(self.list_widget)
         self.list_layout.setContentsMargins(0, 0, 0, 0)
         self.list_layout.setSpacing(4)
@@ -63,15 +74,52 @@ class ColumnPicker(QWidget):
                 widget.deleteLater()
 
         self.checkboxes = {}
+        self.item_widgets = {}
+        widest_text = 0
         for item in items:
-            checkbox = QCheckBox(str(item))
-            checkbox.setChecked(checked)
-            checkbox.setToolTip(str(item))
+            item_name = str(item)
+            checkbox = QCheckBox(item_name)
+            display_widget = checkbox
 
+            if self.rich_feature_labels and " [" in item_name and item_name.endswith("]"):
+                feature_name, applicability = item_name.split(" [", 1)
+                applicability = f"[{applicability}"
+                row = QWidget()
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(6)
+                checkbox = QCheckBox("")
+                label = QLabel(
+                    f"<b>{html.escape(feature_name)}</b> {html.escape(applicability)}"
+                )
+                label.setTextFormat(Qt.RichText)
+                label.setToolTip(item_name)
+                row_layout.addWidget(checkbox)
+                row_layout.addWidget(label)
+                row_layout.addStretch()
+                display_widget = row
+
+                def _toggle_label(_event, box=checkbox):
+                    box.setChecked(not box.isChecked())
+
+                label.mousePressEvent = _toggle_label
+
+            checkbox.setChecked(checked)
+            checkbox.setToolTip(item_name)
+            checkbox.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             checkbox.stateChanged.connect(self._selection_changed)
 
-            self.checkboxes[str(item)] = checkbox
-            self.list_layout.insertWidget(self.list_layout.count() - 1, checkbox)
+            self.checkboxes[item_name] = checkbox
+            self.item_widgets[item_name] = display_widget
+            self.list_layout.insertWidget(self.list_layout.count() - 1, display_widget)
+            widest_text = max(widest_text, checkbox.fontMetrics().horizontalAdvance(item_name))
+
+        content_width = max(self.search.minimumWidth(), widest_text + 56)
+        self.list_widget.setMinimumWidth(content_width)
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        self.filter_items("")
 
     def selected_items(self):
         return [
@@ -88,10 +136,26 @@ class ColumnPicker(QWidget):
     def filter_items(self, text):
         needle = text.strip().lower()
         for name, checkbox in self.checkboxes.items():
-            checkbox.setVisible(needle in name.lower())
+            widget = self.item_widgets.get(name, checkbox)
+            widget.setVisible(needle in name.lower())
 
     def _selection_changed(self):
         self.selectionChange.emit()
+
+
+class WheelLockedComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class WheelLockedSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class WheelLockedDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 def tab_row(parent, labels, callback, compact=False):

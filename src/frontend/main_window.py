@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QListWidget,
     QListWidgetItem,
+    QSizePolicy,
 )
 from PySide6.QtCore import (
     Qt,
@@ -67,7 +68,12 @@ from src.model.model_utils import validate_dataset, prepare_training_data
 from src.model.supervised_model import build_model
 from src.frontend.model_panel import ModelParameterPanel, MODEL_TYPES
 from src.data.test_load import get_available_columns, get_datasets, select_col, change_dtype
-from src.feature.feature import feature_extract
+from src.feature.feature import (
+    build_window_index_table,
+    extract_windowed_feature_dataset,
+    feature_extract,
+    to_feature_label,
+)
 from src.frontend.charts import ChartCanvas
 from src.frontend.data_summary import file_summary, missing_summary
 from src.frontend.unified_model_panel import (
@@ -89,6 +95,9 @@ from src.frontend.widgets import (
     section_label,
     sidebar_base,
     SIDEBAR_WIDTH,
+    WheelLockedComboBox,
+    WheelLockedDoubleSpinBox,
+    WheelLockedSpinBox,
     tab_row,
     table_view,
     taller_dropdown,
@@ -354,6 +363,33 @@ class QualityIssueTableModel(QAbstractTableModel):
         return str(self._data.index[section])
 
 
+class FeaturePickerCompat:
+    """Compatibility shim for legacy code/tests expecting a single feature picker."""
+
+    def __init__(self, window):
+        self.window = window
+
+    def selected_items(self):
+        return self.window._selected_feature_keys()
+
+    def set_selected(self, values):
+        desired_labels = []
+        key_to_label = {
+            key: label
+            for label, key in self.window.feature_label_to_key.items()
+        }
+        for value in values:
+            text = str(value)
+            if text in self.window.feature_label_to_key:
+                desired_labels.append(text)
+            elif text in key_to_label:
+                desired_labels.append(key_to_label[text])
+
+        for picker in self.window.feature_category_pickers.values():
+            available = set(picker.checkboxes.keys())
+            picker.set_selected([label for label in desired_labels if label in available])
+
+
 class DataQualityDialog(QDialog):
     def __init__(self, parent, working_df):
         super().__init__(parent)
@@ -540,6 +576,30 @@ class ReportImagesDialog(QDialog):
         self.image_label.adjustSize()
 
 
+class WindowPreviewDialog(QDialog):
+    def __init__(self, parent, preview_df):
+        super().__init__(parent)
+        self.setWindowTitle("Window Segmentation Preview")
+        self.setMinimumSize(860, 520)
+
+        layout = QVBoxLayout(self)
+        title = QLabel("Preview of generated windows before feature extraction")
+        title.setProperty("panelTitle", True)
+        layout.addWidget(title)
+
+        self.model = PandasTableModel(preview_df)
+        self.table = table_view(self.model)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.table, 1)
+
+        controls = QHBoxLayout()
+        controls.addStretch()
+        close_button = primary_button("Close")
+        close_button.clicked.connect(self.accept)
+        controls.addWidget(close_button)
+        layout.addLayout(controls)
+
+
 class ImageInspectDialog(QDialog):
     def __init__(self, parent, title, image_path):
         super().__init__(parent)
@@ -603,25 +663,35 @@ class ImageInspectDialog(QDialog):
 # ============================================================================
 # Constants
 # ============================================================================
-FEATURES = [
-    # Extension point: add/remove selectable summary metrics here.
-    # Names should match keys returned by src.feature.feature_extract().
-    "count",
-    "mean",
-    "std",
-    "min",
-    "25%",
-    "50%",
-    "75%",
-    "max",
-    "skew",
-    "kurtosis",
-    "rms",
-    "p2p",
-    "variance",
-    "missing_count",
-    "missing_pct",
-]
+FEATURE_CATEGORIES = {
+    "DISTRIBUTION FEATURES": [
+        ("Skewness [Numeric Only]", "skew"),
+        ("Kurtosis [Numeric Only]", "kurtosis"),
+    ],
+    "SIGNAL FEATURES": [
+        ("RMS [Numeric Only]", "rms"),
+        ("Energy [Numeric Only]", "energy"),
+        ("Peak-to-Peak [Numeric Only]", "p2p"),
+        ("Zero Crossing Rate [Numeric Only]", "zcr"),
+    ],
+    "DATA QUALITY": [
+        ("Missing Count [Numeric / Non-Numeric]", "missing_count"),
+        ("Missing Percentage [Numeric / Non-Numeric]", "missing_pct"),
+    ],
+    "DESCRIPTIVE STATISTICS": [
+        ("Count [Numeric / Non-Numeric]", "count"),
+        ("Unique [Numeric / Non-Numeric]", "unique"),
+        ("Top [Non-Numeric Only]", "top"),
+        ("Frequency [Non-Numeric Only]", "freq"),
+        ("Mean [Numeric Only]", "mean"),
+        ("Median [Numeric / Non-Numeric]", "median"),
+        ("Standard Deviation [Numeric Only]", "std"),
+        ("Variance [Numeric Only]", "variance"),
+        ("Min [Numeric Only]", "min"),
+        ("Max [Numeric Only]", "max"),
+        ("Range [Numeric / Non-Numeric]", "range"),
+    ],
+}
 
 CHART_TYPES = [
     # Extension point: add Visualization-tab chart names here, then route them
@@ -672,6 +742,7 @@ class AnalyticsWindow(QMainWindow):
         self.og_df = pd.DataFrame()
         self.working_df = pd.DataFrame()
         self.feature_df = pd.DataFrame()
+        self.feature_summary_meta = {}
         self.latest_correlation_matrix = pd.DataFrame()
         self.feature_use_raw = False
         self.analysis_use_raw = False
@@ -794,21 +865,28 @@ class AnalyticsWindow(QMainWindow):
             self._active_realtime_dataset,
             self,
         )
-        self.main_stack.addWidget(self.playback_page)
+        self.playback_page_scroll = self._wrap_main_page(self.playback_page)
+        self.main_stack.addWidget(self.playback_page_scroll)
 
-        self.sidebar_stack.addWidget(self._import_sidebar())
-        self.sidebar_stack.addWidget(self._feature_sidebar())
-        self.sidebar_stack.addWidget(self._analysis_sidebar())
-        self.sidebar_stack.addWidget(self._visualization_sidebar())
+        self.import_sidebar = self._scrollable_sidebar(self._import_sidebar())
+        self.feature_sidebar = self._scrollable_sidebar(self._feature_sidebar())
+        self.analysis_sidebar = self._scrollable_sidebar(self._analysis_sidebar())
+        self.visualization_sidebar = self._scrollable_sidebar(self._visualization_sidebar())
+
+        self.sidebar_stack.addWidget(self.import_sidebar)
+        self.sidebar_stack.addWidget(self.feature_sidebar)
+        self.sidebar_stack.addWidget(self.analysis_sidebar)
+        self.sidebar_stack.addWidget(self.visualization_sidebar)
         # self.sidebar_stack.addWidget(self._models_sidebar())
         self.model_sidebar = UnifiedModelSidebar()
         self.model_sidebar.add_model_requested.connect(self.add_or_update_model_definition)
         self.model_sidebar.import_external_requested.connect(self.import_external_model)
         self.model_sidebar_scroll = self._scrollable_sidebar(self.model_sidebar)
         self.sidebar_stack.addWidget(self.model_sidebar_scroll)
-        self.results_sidebar = self._results_sidebar()
+        self.results_sidebar = self._scrollable_sidebar(self._results_sidebar())
         self.sidebar_stack.addWidget(self.results_sidebar)
-        self.sidebar_stack.addWidget(self.playback_sidebar)
+        self.playback_sidebar_scroll = self._scrollable_sidebar(self.playback_sidebar)
+        self.sidebar_stack.addWidget(self.playback_sidebar_scroll)
 
         self.on_top_tab_changed(0)
         self.on_workflow_tab_changed(0)
@@ -820,6 +898,15 @@ class AnalyticsWindow(QMainWindow):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(content)
+        return scroll
+
+    def _wrap_main_page(self, page):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setWidget(page)
         return scroll
 
 # ============================================================================
@@ -875,25 +962,6 @@ class AnalyticsWindow(QMainWindow):
         self.create_project_button = primary_button("Create Project")
         self.create_project_button.clicked.connect(self.create_project)
         layout.addWidget(self.create_project_button)
-        layout.addWidget(divider())
-
-        layout.addWidget(section_label("PREPROCESSING"))
-        self.preprocessing_method = taller_dropdown(QComboBox())
-        self.preprocessing_method.addItems([
-            "Impute with Mean",
-            "Impute with Median",
-            "Impute with Mode",
-            "Standardize Numeric",
-            "Normalize Numeric",
-        ])
-        layout.addWidget(QLabel("Apply to selected columns"))
-        layout.addWidget(self.preprocessing_method)
-        apply_preprocessing = primary_button("Apply Preprocessing")
-        apply_preprocessing.clicked.connect(self.apply_selected_preprocessing)
-        layout.addWidget(apply_preprocessing)
-        review_quality = secondary_button("Review Data Quality")
-        review_quality.clicked.connect(self.open_quality_dialog)
-        layout.addWidget(review_quality)
         layout.addStretch()
         return panel
 
@@ -901,42 +969,200 @@ class AnalyticsWindow(QMainWindow):
         """Build controls for selecting columns and feature metrics."""
         panel = sidebar_base()
         layout = panel.layout()
+        sidebar_control_width = SIDEBAR_WIDTH - 52
+
+        def _lock_sidebar_width(widget):
+            widget.setMinimumWidth(sidebar_control_width)
+            widget.setMaximumWidth(sidebar_control_width)
 
         layout.addWidget(section_label("SELECT COLUMNS"))
         layout.addWidget(QLabel("Columns to Analyze"))
+        numeric_header_row = QHBoxLayout()
+        numeric_header_row.setContentsMargins(0, 0, 0, 0)
+        numeric_header_row.setSpacing(8)
+        numeric_header_label = QLabel("Numeric Columns")
+        self.feature_numeric_select_all_checkbox = QCheckBox("")
+        self.feature_numeric_select_all_checkbox.toggled.connect(
+            lambda checked: self._set_picker_checked(self.feature_numeric_picker, checked)
+        )
+        numeric_header_row.addWidget(self.feature_numeric_select_all_checkbox)
+        numeric_header_row.addWidget(numeric_header_label)
+        numeric_header_row.addStretch()
+        numeric_header_container = QWidget()
+        numeric_header_container.setLayout(numeric_header_row)
+        _lock_sidebar_width(numeric_header_container)
+        layout.addWidget(numeric_header_container)
+
         self.feature_numeric_picker = ColumnPicker("Search numeric columns")
-        self.feature_numeric_picker.setMinimumHeight(110)
-        layout.addWidget(QLabel("Numeric Columns"))
+        self.feature_numeric_picker.setMinimumHeight(132)
+        _lock_sidebar_width(self.feature_numeric_picker)
         layout.addWidget(self.feature_numeric_picker)
 
+        non_numeric_header_row = QHBoxLayout()
+        non_numeric_header_row.setContentsMargins(0, 0, 0, 0)
+        non_numeric_header_row.setSpacing(8)
+        non_numeric_header_label = QLabel("Non-Numeric Columns")
+        self.feature_non_numeric_select_all_checkbox = QCheckBox("")
+        self.feature_non_numeric_select_all_checkbox.toggled.connect(
+            lambda checked: self._set_picker_checked(self.feature_non_numeric_picker, checked)
+        )
+        non_numeric_header_row.addWidget(self.feature_non_numeric_select_all_checkbox)
+        non_numeric_header_row.addWidget(non_numeric_header_label)
+        non_numeric_header_row.addStretch()
+        non_numeric_header_container = QWidget()
+        non_numeric_header_container.setLayout(non_numeric_header_row)
+        _lock_sidebar_width(non_numeric_header_container)
+        layout.addWidget(non_numeric_header_container)
+
         self.feature_non_numeric_picker = ColumnPicker("Search non-numeric columns")
-        self.feature_non_numeric_picker.setMinimumHeight(110)
-        layout.addWidget(QLabel("Non-Numeric Columns"))
+        self.feature_non_numeric_picker.setMinimumHeight(132)
+        _lock_sidebar_width(self.feature_non_numeric_picker)
         layout.addWidget(self.feature_non_numeric_picker)
+
+        self.feature_numeric_picker.selectionChange.connect(
+            lambda: self._sync_select_all_checkbox("feature_numeric_select_all_checkbox", self.feature_numeric_picker)
+        )
+        self.feature_non_numeric_picker.selectionChange.connect(
+            lambda: self._sync_select_all_checkbox("feature_non_numeric_select_all_checkbox", self.feature_non_numeric_picker)
+        )
 
         self.feature_use_raw_checkbox = QCheckBox("Use raw dataset for feature extraction")
         self.feature_use_raw_checkbox.toggled.connect(self.on_feature_use_raw_toggled)
+        _lock_sidebar_width(self.feature_use_raw_checkbox)
         layout.addWidget(self.feature_use_raw_checkbox)
         layout.addWidget(divider())
 
+        layout.addWidget(section_label("WINDOWING CONFIGURATION"))
+        self.windowing_config_widgets = []
+        self.windowing_enabled_checkbox = QCheckBox("Enable Sliding Window")
+        self.windowing_enabled_checkbox.toggled.connect(self.on_windowing_toggled)
+        _lock_sidebar_width(self.windowing_enabled_checkbox)
+        layout.addWidget(self.windowing_enabled_checkbox)
+
+        self.window_size_label = QLabel("Window Size")
+        layout.addWidget(self.window_size_label)
+        self.windowing_config_widgets.append(self.window_size_label)
+        window_size_row = QHBoxLayout()
+        window_size_row.setContentsMargins(0, 0, 0, 0)
+        window_size_row.setSpacing(8)
+        self.window_size_input = WheelLockedDoubleSpinBox()
+        self.window_size_input.setRange(0.001, 10_000_000)
+        self.window_size_input.setDecimals(3)
+        self.window_size_input.setValue(100)
+        self.window_size_input.setSingleStep(1)
+        self.window_size_input.setMinimumHeight(28)
+        self.window_unit_combo = taller_dropdown(QComboBox())
+        self.window_unit_combo.addItems(["Samples", "Seconds"])
+        self.window_unit_combo.currentTextChanged.connect(self.on_window_unit_changed)
+        unit_width = 96
+        value_width = max(120, sidebar_control_width - unit_width - 8)
+        self.window_size_input.setMinimumWidth(value_width)
+        self.window_size_input.setMaximumWidth(value_width)
+        self.window_unit_combo.setMinimumWidth(unit_width)
+        self.window_unit_combo.setMaximumWidth(unit_width)
+        window_size_row.addWidget(self.window_size_input, 2)
+        window_size_row.addWidget(self.window_unit_combo, 1)
+        layout.addLayout(window_size_row)
+        self.windowing_config_widgets.extend([self.window_size_input, self.window_unit_combo])
+
+        self.window_sample_rate_label = QLabel("Sample Rate (Hz, used for seconds)")
+        layout.addWidget(self.window_sample_rate_label)
+        self.windowing_config_widgets.append(self.window_sample_rate_label)
+        self.window_sample_rate_input = WheelLockedDoubleSpinBox()
+        self.window_sample_rate_input.setRange(0.001, 1_000_000)
+        self.window_sample_rate_input.setDecimals(3)
+        self.window_sample_rate_input.setValue(1.0)
+        self.window_sample_rate_input.setSingleStep(0.5)
+        _lock_sidebar_width(self.window_sample_rate_input)
+        layout.addWidget(self.window_sample_rate_input)
+        self.windowing_config_widgets.append(self.window_sample_rate_input)
+
+        self.window_overlap_label = QLabel("Overlap Percentage (0-90%)")
+        layout.addWidget(self.window_overlap_label)
+        self.windowing_config_widgets.append(self.window_overlap_label)
+        self.window_overlap_input = WheelLockedSpinBox()
+        self.window_overlap_input.setRange(0, 90)
+        self.window_overlap_input.setValue(50)
+        _lock_sidebar_width(self.window_overlap_input)
+        layout.addWidget(self.window_overlap_input)
+        self.windowing_config_widgets.append(self.window_overlap_input)
+
+        self.window_type_label = QLabel("Window Type")
+        layout.addWidget(self.window_type_label)
+        self.windowing_config_widgets.append(self.window_type_label)
+        self.window_type_combo = taller_dropdown(WheelLockedComboBox())
+        self.window_type_combo.addItems(["Fixed Windows", "Sliding Windows"])
+        _lock_sidebar_width(self.window_type_combo)
+        layout.addWidget(self.window_type_combo)
+        self.windowing_config_widgets.append(self.window_type_combo)
+
+        self.window_partial_label = QLabel("Partial Windows")
+        layout.addWidget(self.window_partial_label)
+        self.windowing_config_widgets.append(self.window_partial_label)
+        self.window_partial_combo = taller_dropdown(WheelLockedComboBox())
+        self.window_partial_combo.addItems(["Keep Partial Windows", "Ignore Partial Windows"])
+        _lock_sidebar_width(self.window_partial_combo)
+        layout.addWidget(self.window_partial_combo)
+        self.windowing_config_widgets.append(self.window_partial_combo)
+
+        self.preview_windows_button = secondary_button("Preview Windows")
+        self.preview_windows_button.clicked.connect(self.preview_windows)
+        self.preview_windows_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        _lock_sidebar_width(self.preview_windows_button)
+        layout.addWidget(self.preview_windows_button)
+        self.windowing_config_widgets.append(self.preview_windows_button)
+
+        layout.addWidget(divider())
+
         layout.addWidget(section_label("SELECT FEATURES"))
-        layout.addWidget(QLabel("Features to Extract"))
-        self.feature_picker = ColumnPicker("Search features")
-        self.feature_picker.setMinimumHeight(135)
-        self.feature_picker.set_items(FEATURES, checked=True)
-        layout.addWidget(self.feature_picker)
+        self.feature_category_pickers = {}
+        self.feature_category_toggles = {}
+        self.feature_label_to_key = {}
+        for category, feature_pairs in FEATURE_CATEGORIES.items():
+            category_toggle = QCheckBox(category.title())
+            category_toggle.setChecked(True)
+            _lock_sidebar_width(category_toggle)
+            layout.addWidget(category_toggle)
+
+            picker = ColumnPicker(f"Search {category.lower()}", rich_feature_labels=True)
+            labels = [label for label, _key in feature_pairs]
+            for label, key in feature_pairs:
+                self.feature_label_to_key[label] = key
+            picker.set_items(labels, checked=True)
+
+            # Keep picker height proportional to option count so each category
+            # box is sized to its checkbox list instead of a fixed tall panel.
+            visible_rows = max(2, len(labels))
+            picker_height = min(240, 42 + (visible_rows * 24))
+            picker.setMinimumHeight(picker_height)
+            picker.setMaximumHeight(picker_height)
+            _lock_sidebar_width(picker)
+
+            category_toggle.toggled.connect(
+                lambda checked, p=picker: self._set_picker_checked(p, checked)
+            )
+            self.feature_category_pickers[category] = picker
+            self.feature_category_toggles[category] = category_toggle
+            layout.addWidget(picker)
+
+        self.feature_picker = FeaturePickerCompat(self)
 
         extract_button = primary_button("Extract Features")
         extract_button.clicked.connect(self.extract_features)
+        _lock_sidebar_width(extract_button)
         layout.addWidget(extract_button)
 
         import_features = secondary_button("Import Feature Dataset")
         import_features.clicked.connect(self.browse_feature_dataset)
+        _lock_sidebar_width(import_features)
         layout.addWidget(import_features)
 
         export_features = secondary_button("Export Feature Dataset")
         export_features.clicked.connect(self.export_features)
+        _lock_sidebar_width(export_features)
         layout.addWidget(export_features)
+
+        self.on_windowing_toggled(False)
         layout.addStretch()
         return panel
 
@@ -1065,6 +1291,7 @@ class AnalyticsWindow(QMainWindow):
         export_chart.clicked.connect(self.export_chart_gui)
         layout.addWidget(export_chart)
 
+        self.update_chart_controls()
         layout.addStretch()
         return panel
 
@@ -1201,6 +1428,7 @@ class AnalyticsWindow(QMainWindow):
 
         missing_layout.addWidget(title)
         missing_layout.addWidget(self.missing_table)
+        self.missing_table.setMinimumHeight(220)
 
         # Missing-value chart lives in Import because it describes data quality.
         self.missing_chart = ChartCanvas(
@@ -1246,6 +1474,7 @@ class AnalyticsWindow(QMainWindow):
         self.file_summary_table = table_view(self.file_summary_model)
         self.file_summary_table.setSelectionBehavior(QTableView.SelectRows)
         self.file_summary_table.selectionModel().selectionChanged.connect(self.on_summary_selection_changed)
+        self.file_summary_table.setMinimumHeight(280)
         summary_layout.addWidget(self.file_summary_table)
 
         layout.addWidget(preview_widget, 0, 0, 1, 3)
@@ -1260,7 +1489,9 @@ class AnalyticsWindow(QMainWindow):
         layout.setRowStretch(0, 3)
         layout.setRowStretch(1, 2)
         layout.setRowStretch(2, 1)
-        self.main_stack.addWidget(page)
+        self.import_page = page
+        self.import_page_scroll = self._wrap_main_page(page)
+        self.main_stack.addWidget(self.import_page_scroll)
 
     # ============================================================================
     # Data Type Conversion
@@ -1402,7 +1633,13 @@ class AnalyticsWindow(QMainWindow):
             data_panel("FEATURE DATASET SUMMARY", self.feature_summary_model),
             1,
         )
-        self.main_stack.addWidget(page)
+        if layout.count() > 1:
+            summary_panel = layout.itemAt(1).widget()
+            if summary_panel is not None:
+                summary_panel.setMinimumHeight(240)
+        self.feature_page = page
+        self.feature_page_scroll = self._wrap_main_page(page)
+        self.main_stack.addWidget(self.feature_page_scroll)
 
     def _build_analysis_page(self):
         """Build the shared analysis chart plus result table."""
@@ -1419,7 +1656,9 @@ class AnalyticsWindow(QMainWindow):
         self.analysis_table = table_view(self.analysis_model)
         layout.addWidget(self.analysis_title)
         layout.addWidget(self.analysis_table, 1)
-        self.main_stack.addWidget(page)
+        self.analysis_page = page
+        self.analysis_page_scroll = self._wrap_main_page(page)
+        self.main_stack.addWidget(self.analysis_page_scroll)
 
     def _build_visualization_page(self):
         page = QWidget()
@@ -1435,7 +1674,9 @@ class AnalyticsWindow(QMainWindow):
         self.visualization_table = table_view(self.visualization_model)
         layout.addWidget(self.visualization_title)
         layout.addWidget(self.visualization_table, 1)
-        self.main_stack.addWidget(page)
+        self.visualization_page = page
+        self.visualization_page_scroll = self._wrap_main_page(page)
+        self.main_stack.addWidget(self.visualization_page_scroll)
 
     def _build_models_page(self):
         # page = QWidget()
@@ -1460,7 +1701,8 @@ class AnalyticsWindow(QMainWindow):
         self.unified_model_page.queue_reordered.connect(self.on_queue_reordered)
         self.unified_model_page.train_queue_requested.connect(self.train_model_queue)
         layout.addWidget(self.unified_model_page, 1)
-        self.main_stack.addWidget(self.model_page)
+        self.model_page_scroll = self._wrap_main_page(self.model_page)
+        self.main_stack.addWidget(self.model_page_scroll)
 
     def _build_results_page(self):
         self.results_page = QWidget()
@@ -1514,7 +1756,8 @@ class AnalyticsWindow(QMainWindow):
         self.results_pages.addWidget(results_view)
         self.results_pages.addWidget(comparison_view)
         layout.addWidget(self.results_pages, 1)
-        self.main_stack.addWidget(self.results_page)
+        self.results_page_scroll = self._wrap_main_page(self.results_page)
+        self.main_stack.addWidget(self.results_page_scroll)
 
 # ============================================================================
 # Navigation & Tab Management
@@ -1544,22 +1787,22 @@ class AnalyticsWindow(QMainWindow):
 
         # Models
         if index == 1:
-            self.main_stack.setCurrentWidget(self.model_page)
+            self.main_stack.setCurrentWidget(self.model_page_scroll)
             self.sidebar_stack.setCurrentWidget(self.model_sidebar_scroll)
             self.refresh_model_page()
             return
 
         # Results
         if index == 2:
-            self.main_stack.setCurrentWidget(self.results_page)
+            self.main_stack.setCurrentWidget(self.results_page_scroll)
             self.sidebar_stack.setCurrentWidget(self.results_sidebar)
             self.refresh_results_page()
             return
 
         # Playback & Annotation
         if index == 3:
-            self.main_stack.setCurrentWidget(self.playback_page)
-            self.sidebar_stack.setCurrentWidget(self.playback_sidebar)
+            self.main_stack.setCurrentWidget(self.playback_page_scroll)
+            self.sidebar_stack.setCurrentWidget(self.playback_sidebar_scroll)
             self.refresh_realtime_dataset()
             return
 
@@ -2457,6 +2700,7 @@ class AnalyticsWindow(QMainWindow):
             return
 
         self.feature_df = feature_df
+        self.feature_summary_meta = {}
         self._set_dirty(True)
         self.refresh_feature_tables()
         self.on_workflow_tab_changed(1)
@@ -2503,8 +2747,8 @@ class AnalyticsWindow(QMainWindow):
         self.populate_column_controls()
         # Ensure the working dataframe matches the project's selected columns.
         self.update_selected_columns()
-        self.feature_preview_model.set_data(self.feature_df)
-        self.feature_summary_model.set_data(file_summary(self.feature_df))
+        self.feature_summary_meta = {}
+        self.refresh_feature_tables()
         self._suppress_dirty = False
         self._set_dirty(False)
         QMessageBox.information(self, "Project Loaded", "Project loaded successfully.")
@@ -2594,6 +2838,7 @@ class AnalyticsWindow(QMainWindow):
 
     def populate_column_controls(self):
         """Refresh every control whose choices come from dataset columns."""
+        self._clear_picker_searches()
         self.column_picker.blockSignals(True)
         self.column_picker.set_items(self.columns, checked=True)
         self.column_picker.blockSignals(False)
@@ -2637,6 +2882,8 @@ class AnalyticsWindow(QMainWindow):
             self._populate_picker_choices(self.feature_non_numeric_picker, feature_non_numeric_columns, checked=False, preserve_selection=False)
             self._populate_picker_choices(self.analysis_numeric_picker, analysis_numeric_columns, checked=False, preserve_selection=False)
             self._populate_picker_choices(self.analysis_non_numeric_picker, analysis_non_numeric_columns, checked=False, preserve_selection=False)
+            self._resize_picker_to_items(self.feature_numeric_picker, len(feature_numeric_columns))
+            self._resize_picker_to_items(self.feature_non_numeric_picker, len(feature_non_numeric_columns))
             self.feature_numeric_picker.set_selected([c for c in selected_columns if c in feature_numeric_columns])
             self.feature_non_numeric_picker.set_selected([c for c in selected_columns if c in feature_non_numeric_columns])
             self.analysis_numeric_picker.set_selected([c for c in selected_columns if c in analysis_numeric_columns])
@@ -2647,6 +2894,8 @@ class AnalyticsWindow(QMainWindow):
             self.feature_non_numeric_picker.blockSignals(False)
             self.analysis_numeric_picker.blockSignals(False)
             self.analysis_non_numeric_picker.blockSignals(False)
+        self._sync_select_all_checkbox("feature_numeric_select_all_checkbox", self.feature_numeric_picker)
+        self._sync_select_all_checkbox("feature_non_numeric_select_all_checkbox", self.feature_non_numeric_picker)
         if label:
             index = self.label_combo.findText(label)
             if index >= 0:
@@ -2661,6 +2910,30 @@ class AnalyticsWindow(QMainWindow):
         if preserve_selection:
             picker.set_selected([item for item in selected if item in items])
         picker.blockSignals(False)
+
+    def _resize_picker_to_items(self, picker, item_count, minimum_rows=2, maximum_rows=8):
+        del maximum_rows
+        visible_rows = max(minimum_rows, int(item_count) if item_count else minimum_rows)
+        picker_height = 42 + (visible_rows * 24)
+        picker.setMinimumHeight(picker_height)
+        picker.setMaximumHeight(picker_height)
+
+    def _sync_select_all_checkbox(self, checkbox, picker):
+        if not hasattr(self, checkbox):
+            return
+        widget = getattr(self, checkbox)
+        if not picker.checkboxes:
+            widget.blockSignals(True)
+            widget.setChecked(False)
+            widget.setEnabled(False)
+            widget.blockSignals(False)
+            return
+        widget.setEnabled(True)
+        selected_count = len(picker.selected_items())
+        all_selected = selected_count == len(picker.checkboxes)
+        widget.blockSignals(True)
+        widget.setChecked(all_selected)
+        widget.blockSignals(False)
 
     def _get_active_dataframe(self, use_raw=False):
         if use_raw:
@@ -2705,6 +2978,8 @@ class AnalyticsWindow(QMainWindow):
             checked=False,
             preserve_selection=True,
         )
+        self._resize_picker_to_items(self.feature_numeric_picker, len(self.feature_numeric_picker.checkboxes))
+        self._resize_picker_to_items(self.feature_non_numeric_picker, len(self.feature_non_numeric_picker.checkboxes))
         self._populate_picker_choices(
             self.analysis_numeric_picker,
             self.numeric_columns(
@@ -2715,6 +2990,8 @@ class AnalyticsWindow(QMainWindow):
             checked=False,
             preserve_selection=True,
         )
+        self._sync_select_all_checkbox("feature_numeric_select_all_checkbox", self.feature_numeric_picker)
+        self._sync_select_all_checkbox("feature_non_numeric_select_all_checkbox", self.feature_non_numeric_picker)
         self._populate_picker_choices(
             self.analysis_non_numeric_picker,
             self.non_numeric_columns(
@@ -2725,6 +3002,29 @@ class AnalyticsWindow(QMainWindow):
             checked=False,
             preserve_selection=True,
         )
+
+    def _clear_picker_searches(self):
+        picker_names = [
+            "column_picker",
+            "feature_numeric_picker",
+            "feature_non_numeric_picker",
+            "analysis_numeric_picker",
+            "analysis_non_numeric_picker",
+        ]
+        for name in picker_names:
+            picker = getattr(self, name, None)
+            if picker is not None and hasattr(picker, "search"):
+                picker.search.blockSignals(True)
+                picker.search.clear()
+                picker.search.blockSignals(False)
+                picker.filter_items("")
+
+        for picker in getattr(self, "feature_category_pickers", {}).values():
+            if hasattr(picker, "search"):
+                picker.search.blockSignals(True)
+                picker.search.clear()
+                picker.search.blockSignals(False)
+                picker.filter_items("")
 
     def get_selected_label(self):
         """Return the selected label column or None when the user chose no label."""
@@ -2861,6 +3161,7 @@ class AnalyticsWindow(QMainWindow):
         # stale feature/analysis output cannot leak into the next project.
         self.project = None
         self.feature_df = pd.DataFrame()
+        self.feature_summary_meta = {}
         self.latest_correlation_matrix = pd.DataFrame()
         self.analysis_model.set_data(pd.DataFrame())
         self.visualization_model.set_data(pd.DataFrame())
@@ -4016,84 +4317,374 @@ class AnalyticsWindow(QMainWindow):
     # ============================================================================
     # Feature Extraction
     # ============================================================================
-    def extract_features(self):
-        """Run the existing feature_extract helper for selected columns."""
+    def on_windowing_toggled(self, checked):
+        if not hasattr(self, "windowing_config_widgets"):
+            return
+
+        enabled = bool(checked)
+        for widget in self.windowing_config_widgets:
+            widget.setVisible(enabled)
+        self.windowing_enabled_checkbox.setVisible(True)
+
+    def on_window_type_changed(self, value):
+        del value
+
+    def on_window_unit_changed(self, value):
+        del value
+
+    def _selected_feature_keys(self):
+        keys = []
+        seen = set()
+        for picker in getattr(self, "feature_category_pickers", {}).values():
+            for label in picker.selected_items():
+                key = self.feature_label_to_key.get(label)
+                if key and key not in seen:
+                    keys.append(key)
+                    seen.add(key)
+        return keys
+
+    def _set_picker_checked(self, picker, checked):
+        picker.blockSignals(True)
+        for checkbox in picker.checkboxes.values():
+            checkbox.setChecked(bool(checked))
+        picker.blockSignals(False)
+
+    def _compute_regular_feature_value(self, series, feature_key):
+        key = str(feature_key)
+        if key == "count":
+            return int(series.count())
+        if key == "unique":
+            return int(series.dropna().nunique())
+        if key == "top":
+            non_null = series.dropna()
+            if non_null.empty:
+                return np.nan
+            modes = non_null.mode(dropna=True)
+            return modes.iloc[0] if not modes.empty else np.nan
+        if key == "freq":
+            non_null = series.dropna()
+            if non_null.empty:
+                return 0
+            return int(non_null.value_counts(dropna=True).iloc[0])
+
+        if pd.api.types.is_numeric_dtype(series):
+            numeric = pd.to_numeric(series, errors="coerce").dropna()
+            if numeric.empty:
+                return np.nan
+            values = numeric.to_numpy(dtype=float)
+            if key == "mean":
+                return float(np.mean(values))
+            if key == "median":
+                return float(np.median(values))
+            if key == "std":
+                return float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
+            if key == "variance":
+                return float(np.var(values))
+            if key == "min":
+                return float(np.min(values))
+            if key == "max":
+                return float(np.max(values))
+            if key == "range":
+                return float(np.max(values) - np.min(values))
+            if key == "skew":
+                return float(pd.Series(values).skew()) if len(values) > 2 else 0.0
+            if key == "kurtosis":
+                return float(pd.Series(values).kurt()) if len(values) > 3 else 0.0
+            if key == "rms":
+                return float(np.sqrt(np.mean(values ** 2)))
+            if key == "energy":
+                return float(np.sum(values ** 2))
+            if key == "p2p":
+                return float(np.ptp(values))
+            if key == "zcr":
+                if len(values) < 2:
+                    return 0.0
+                sign_changes = np.count_nonzero(np.signbit(values[1:]) != np.signbit(values[:-1]))
+                return float(sign_changes / (len(values) - 1))
+            if key == "missing_count":
+                return int(series.isna().sum())
+            if key == "missing_pct":
+                return float(series.isna().mean() * 100.0) if len(series) else 0.0
+            return np.nan
+
+        if key == "median":
+            return series.dropna().mode().iloc[0] if not series.dropna().empty else np.nan
+        if key == "range":
+            return int(series.dropna().nunique())
+        if key == "missing_count":
+            return int(series.isna().sum())
+        if key == "missing_pct":
+            return float(series.isna().mean() * 100.0) if len(series) else 0.0
+        if key in ("mean", "std", "variance", "min", "max", "skew", "kurtosis", "rms", "energy", "p2p", "zcr"):
+            return np.nan
+        return series.count() if key == "count" else np.nan
+
+    def _feature_summary_rows(self):
+        meta = self.feature_summary_meta or {}
+        selected_columns = meta.get("selected_columns", [])
+        selected_features = meta.get("selected_features", [])
+        total_features_created = len([
+            col
+            for col in self.feature_df.columns
+            if col not in (
+                "signal",
+                "Signal",
+                "Window Number",
+                "Start Sample",
+                "End Sample",
+                "Start Time (s)",
+                "End Time (s)",
+            )
+        ])
+        feature_shape = f"{self.feature_df.shape[0]} x {self.feature_df.shape[1]}"
+
+        return [
+            {"Metric": "Windowing", "Value": "Enabled" if meta.get("windowing_enabled") else "Disabled"},
+            {"Metric": "Original Dataset Size", "Value": meta.get("original_dataset_size", 0)},
+            {"Metric": "Window Size", "Value": meta.get("window_size_display", "N/A")},
+            {"Metric": "Step Size", "Value": meta.get("step_size_display", "N/A")},
+            {"Metric": "Overlap", "Value": meta.get("overlap_display", "N/A")},
+            {"Metric": "Partial Windows", "Value": meta.get("partial_policy", "N/A")},
+            {"Metric": "Number of Windows Generated", "Value": meta.get("num_windows", 0)},
+            {"Metric": "Numeric Columns Processed", "Value": meta.get("numeric_columns_count", 0)},
+            {"Metric": "Statistical Features Extracted", "Value": meta.get("statistical_features_count", 0)},
+            {"Metric": "Selected Columns", "Value": ", ".join(selected_columns) if selected_columns else "None"},
+            {"Metric": "Selected Features", "Value": ", ".join(selected_features) if selected_features else "None"},
+            {"Metric": "Total Features Created", "Value": total_features_created},
+            {"Metric": "Feature Dataset Shape", "Value": feature_shape},
+        ]
+
+    def _windowing_config(self):
+        enabled = hasattr(self, "windowing_enabled_checkbox") and self.windowing_enabled_checkbox.isChecked()
+        if not enabled:
+            return {"enabled": False}
+
+        unit = self.window_unit_combo.currentText().strip().lower()
+        return {
+            "enabled": True,
+            "window_size": float(self.window_size_input.value()),
+            "window_unit": unit,
+            "window_type": self.window_type_combo.currentText().strip(),
+            "overlap_pct": int(self.window_overlap_input.value()),
+            "keep_partial": self.window_partial_combo.currentText().strip().lower().startswith("keep"),
+            "sample_rate_hz": float(self.window_sample_rate_input.value()),
+        }
+
+    def _window_size_and_step_samples(self, cfg):
+        unit = cfg["window_unit"]
+        window_size = float(cfg["window_size"])
+        sample_rate = float(cfg["sample_rate_hz"])
+        window_size_samples = max(1, int(round(window_size * sample_rate))) if unit == "seconds" else max(1, int(round(window_size)))
+        if cfg["window_type"].lower().startswith("sliding"):
+            step_samples = max(1, int(window_size_samples * (1 - (cfg["overlap_pct"] / 100.0))))
+        else:
+            step_samples = window_size_samples
+        return window_size_samples, step_samples
+
+    def _validate_windowing_inputs(self, df, numeric_signals, requested_feature_keys, cfg):
+        if not cfg.get("enabled"):
+            return None
+
+        if not numeric_signals:
+            return "Select at least one numeric column."
+
+        statistical_keys = [key for key in requested_feature_keys if key not in ("missing_count", "missing_pct")]
+        if not statistical_keys:
+            return "Select at least one statistical feature (for example Mean, Median, Standard Deviation, Variance, RMS, Min, or Max)."
+
+        if float(cfg["window_size"]) <= 0:
+            return "Window size must be greater than zero."
+
+        overlap = float(cfg["overlap_pct"])
+        if overlap < 0 or overlap > 90:
+            return "Overlap must be between 0% and 90%."
+
+        window_size_samples, step_samples = self._window_size_and_step_samples(cfg)
+        if step_samples <= 0:
+            return "Step size must be greater than zero."
+
+        if len(df.index) == 0:
+            return "Dataset is empty."
+
+        if window_size_samples > len(df.index) and not cfg.get("keep_partial"):
+            return (
+                "Window size is larger than the dataset. "
+                "Enable 'Keep Partial Windows' or choose a smaller window size."
+            )
+
+        return None
+
+    def preview_windows(self):
         df = self._feature_source_dataframe()
         if df.empty:
-            QMessageBox.warning(self, "Missing Dataset", "Open a dataset before extracting features.")
+            QMessageBox.warning(self, "Missing Dataset", "Open a dataset before previewing windows.")
             return
 
-        signals = self.feature_numeric_picker.selected_items() + self.feature_non_numeric_picker.selected_items()
-        if not signals:
-            QMessageBox.warning(self, "Missing Signals", "Select at least one signal.")
+        numeric_signals = self.feature_numeric_picker.selected_items()
+        requested_feature_keys = self._selected_feature_keys()
+
+        cfg = self._windowing_config()
+        if not cfg.get("enabled"):
+            QMessageBox.information(self, "Windowing Disabled", "Enable windowing to preview data segmentation.")
             return
 
-        requested_features = self.feature_picker.selected_items()
+        validation_error = self._validate_windowing_inputs(df, numeric_signals, requested_feature_keys, cfg)
+        if validation_error:
+            QMessageBox.warning(self, "Invalid Windowing Configuration", validation_error)
+            return
+
         try:
-            raw_features = feature_extract(df, signals)
+            unit = cfg["window_unit"]
+            sample_rate = cfg["sample_rate_hz"]
+            window_size_samples, step = self._window_size_and_step_samples(cfg)
+
+            preview_df = build_window_index_table(
+                length=len(df),
+                window_size_samples=window_size_samples,
+                step_samples=step,
+                keep_partial=cfg["keep_partial"],
+                use_time=(unit == "seconds"),
+                sample_rate_hz=sample_rate,
+            )
         except Exception as error:
-            self.show_error("Feature Extraction Error", error)
+            self.show_error("Window Preview Error", error)
             return
 
-        # feature_extract returns a mapping per signal; normalize it into one
-        # table row per signal for preview, export, and project persistence.
-        rows = []
-        for signal, values in raw_features.items():
-            row = {"signal": signal}
-            for feature in requested_features:
-                row[feature] = values.get(feature, "")
-            rows.append(row)
+        if preview_df.empty:
+            QMessageBox.warning(self, "No Windows", "No windows were generated with the current configuration.")
+            return
 
-        self.feature_df = pd.DataFrame(rows)
+        dialog = WindowPreviewDialog(self, preview_df)
+        dialog.exec()
+
+    def extract_features(self):
+        """Extract selected features either over full columns or over windows."""
+        self._run_feature_extraction(mark_dirty=True, show_messages=True, navigate=True)
+
+    def _run_feature_extraction(self, mark_dirty, show_messages, navigate):
+        df = self._feature_source_dataframe()
+        if df.empty:
+            if show_messages:
+                QMessageBox.warning(self, "Missing Dataset", "Open a dataset before extracting features.")
+            return False
+
+        numeric_signals = self.feature_numeric_picker.selected_items()
+        non_numeric_signals = self.feature_non_numeric_picker.selected_items()
+        signals = numeric_signals + non_numeric_signals
+        if not signals:
+            if show_messages:
+                QMessageBox.warning(self, "Missing Signals", "Select at least one signal.")
+            return False
+
+        requested_feature_keys = self._selected_feature_keys()
+        if not requested_feature_keys:
+            if show_messages:
+                QMessageBox.warning(self, "Missing Features", "Select at least one feature to extract.")
+            return False
+
+        cfg = self._windowing_config()
+        selected_feature_labels = [to_feature_label(key) for key in requested_feature_keys]
+        validation_error = self._validate_windowing_inputs(df, numeric_signals, requested_feature_keys, cfg)
+        if validation_error:
+            if show_messages:
+                QMessageBox.warning(self, "Invalid Windowing Configuration", validation_error)
+            return False
+
+        try:
+            if cfg.get("enabled"):
+                feature_df, window_meta = extract_windowed_feature_dataset(
+                    df=df,
+                    numeric_columns=numeric_signals,
+                    feature_keys=requested_feature_keys,
+                    window_size=cfg["window_size"],
+                    window_unit=cfg["window_unit"],
+                    overlap_pct=cfg["overlap_pct"],
+                    window_type=cfg["window_type"],
+                    keep_partial=cfg["keep_partial"],
+                    sample_rate_hz=cfg["sample_rate_hz"],
+                )
+
+                self.feature_df = feature_df
+                window_size_samples = int(window_meta.get("window_size_samples", 0))
+                step_samples = int(window_meta.get("step_samples", 0))
+                self.feature_summary_meta = {
+                    "windowing_enabled": True,
+                    "original_dataset_size": int(len(df.index)),
+                    "window_size_display": f"{cfg['window_size']} {cfg['window_unit']}",
+                    "step_size_display": f"{step_samples} samples",
+                    "overlap_display": f"{cfg['overlap_pct']}%",
+                    "partial_policy": "Keep Partial Windows" if cfg["keep_partial"] else "Ignore Partial Windows",
+                    "num_windows": window_meta.get("num_windows", len(feature_df.index)),
+                    "selected_columns": list(numeric_signals),
+                    "selected_features": selected_feature_labels,
+                    "numeric_columns_count": len(numeric_signals),
+                    "statistical_features_count": len([k for k in requested_feature_keys if k not in ("missing_count", "missing_pct")]),
+                    "window_size_samples": window_size_samples,
+                    "step_samples": step_samples,
+                    "window_config": cfg,
+                }
+            else:
+                rows = []
+                for signal in signals:
+                    series = df[signal]
+                    row = {"signal": signal}
+                    for feature_key in requested_feature_keys:
+                        value = self._compute_regular_feature_value(series, feature_key)
+                        row[feature_key] = value
+                    rows.append(row)
+
+                self.feature_df = pd.DataFrame(rows)
+                self.feature_summary_meta = {
+                    "windowing_enabled": False,
+                    "original_dataset_size": int(len(df.index)),
+                    "window_size_display": "N/A",
+                    "step_size_display": "N/A",
+                    "overlap_display": "N/A",
+                    "partial_policy": "N/A",
+                    "num_windows": 1 if not self.feature_df.empty else 0,
+                    "selected_columns": list(signals),
+                    "selected_features": selected_feature_labels,
+                    "numeric_columns_count": len(numeric_signals),
+                    "statistical_features_count": len([k for k in requested_feature_keys if k not in ("missing_count", "missing_pct")]),
+                    "window_config": {"enabled": False},
+                }
+        except Exception as error:
+            if show_messages:
+                self.show_error("Feature Extraction Error", error)
+            return False
+
         if self.project is not None:
-            # Save the recipe independently from feature_df so users can audit
-            # which source columns and statistics produced the table.
             self.project["feature_extraction"] = {
-                "columns": list(signals),
-                "metrics": list(requested_features),
+                "columns": list(self.feature_summary_meta.get("selected_columns", [])),
+                "metrics": list(requested_feature_keys),
+                "windowing": self.feature_summary_meta.get("window_config", {"enabled": False}),
             }
-        self._set_dirty(True)
+
+        if mark_dirty:
+            self._set_dirty(True)
+
         self.refresh_feature_tables()
-        self.on_workflow_tab_changed(1)
+        if navigate:
+            self.on_workflow_tab_changed(1)
+        return True
 
     def refresh_feature_tables_for_active_dataset(self):
         """Recompute feature results when the source dataset toggle changes."""
         if self.feature_df.empty:
             return
-
-        df = self._feature_source_dataframe()
-        if df.empty:
+        if not self._run_feature_extraction(mark_dirty=False, show_messages=False, navigate=False):
             self.feature_df = pd.DataFrame()
+            self.feature_summary_meta = {}
             self.refresh_feature_tables()
-            return
-
-        signals = self.feature_numeric_picker.selected_items() + self.feature_non_numeric_picker.selected_items()
-        if not signals:
-            self.feature_df = pd.DataFrame()
-            self.refresh_feature_tables()
-            return
-
-        requested_features = self.feature_picker.selected_items()
-        try:
-            raw_features = feature_extract(df, signals)
-        except Exception as error:
-            self.show_error("Feature Extraction Error", error)
-            return
-
-        rows = []
-        for signal, values in raw_features.items():
-            row = {"signal": signal}
-            for feature in requested_features:
-                row[feature] = values.get(feature, "")
-            rows.append(row)
-
-        self.feature_df = pd.DataFrame(rows)
-        self.refresh_feature_tables()
 
     def refresh_feature_tables(self):
         """Refresh the feature dataset preview and summary models."""
         self.feature_preview_model.set_data(self.feature_df)
-        self.feature_summary_model.set_data(file_summary(self.feature_df))
+        summary_rows = self._feature_summary_rows() if self.feature_summary_meta else []
+        if summary_rows:
+            self.feature_summary_model.set_data(pd.DataFrame(summary_rows))
+        else:
+            self.feature_summary_model.set_data(pd.DataFrame(columns=["Metric", "Value"]))
 
     def export_features(self):
         """Export the current feature table to CSV."""
