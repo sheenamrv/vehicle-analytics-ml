@@ -31,7 +31,9 @@ def build_classification_results(model, X_test, y_test, predictions, feature_col
 
 def create_cluster_summary(cluster_labels):
     counts = pd.Series(cluster_labels).value_counts().sort_index()
-    return pd.DataFrame({"cluster": counts.index, "count": counts.values})
+    frame = pd.DataFrame({"cluster": counts.index, "count": counts.values})
+    frame["description"] = frame["cluster"].apply(lambda value: "Noise" if value == -1 else f"Cluster {value}")
+    return frame
 
 
 def create_clustered_dataframe(df, cluster_labels):
@@ -40,18 +42,26 @@ def create_clustered_dataframe(df, cluster_labels):
     return clustered_df
 
 
-def create_pca_cluster_data(X_scaled, cluster_labels):
-    pca = PCA(n_components=2)
+def create_pca_cluster_data(X_scaled, cluster_labels, n_components=2):
+    max_components = min(X_scaled.shape[0], X_scaled.shape[1])
+    if max_components < 1:
+        raise ValueError("PCA requires at least one row and one feature.")
+    actual_components = min(int(n_components), max_components)
+    pca = PCA(n_components=actual_components)
     pca_data = pca.fit_transform(X_scaled)
+    pc2 = pca_data[:, 1] if actual_components >= 2 else np.zeros(len(pca_data))
     pca_df = pd.DataFrame({
         "PC1": pca_data[:, 0],
-        "PC2": pca_data[:, 1],
-        "cluster": cluster_labels.astype(str),
+        "PC2": pc2,
+        "cluster": np.asarray(cluster_labels).astype(str),
     })
     return {
         "pca_df": pca_df,
+        "pca": pca,
+        "requested_components": int(n_components),
+        "actual_components": actual_components,
         "explained_variance_ratio": pca.explained_variance_ratio_,
-        "explained_variance_sum": pca.explained_variance_ratio_.sum(),
+        "explained_variance_sum": float(pca.explained_variance_ratio_.sum()),
     }
 
 
@@ -232,15 +242,87 @@ def _build_cluster_summary_chart(cluster_summary, path):
     return True
 
 
+def _build_cluster_plot(cluster_plot_data, component_count, path):
+    """Plot PCA cluster separation or a one-dimensional cluster distribution."""
+    if not cluster_plot_data:
+        return False
+
+    frame = pd.DataFrame(cluster_plot_data).copy()
+    if not {"PC1", "cluster"}.issubset(frame.columns):
+        return False
+
+    frame["PC1"] = pd.to_numeric(frame["PC1"], errors="coerce")
+    if "PC2" in frame.columns:
+        frame["PC2"] = pd.to_numeric(frame["PC2"], errors="coerce")
+    frame = frame.dropna(subset=["PC1", "cluster"])
+    if frame.empty:
+        return False
+
+    clusters = list(pd.unique(frame["cluster"].astype(str)))
+    cmap = plt.get_cmap("tab10")
+    plt.figure(figsize=(7.6, 5.0))
+
+    if int(component_count or 2) >= 2 and "PC2" in frame.columns:
+        frame = frame.dropna(subset=["PC2"])
+        if frame.empty:
+            plt.close()
+            return False
+        for index, cluster in enumerate(clusters):
+            rows = frame[frame["cluster"].astype(str) == cluster]
+            label = "Noise" if cluster == "-1" else f"Cluster {cluster}"
+            plt.scatter(
+                rows["PC1"],
+                rows["PC2"],
+                label=label,
+                alpha=0.85,
+                color=cmap(index % 10),
+            )
+        plt.xlabel("Principal component 1")
+        plt.ylabel("Principal component 2")
+        plt.title("Cluster Separation (PCA)")
+    else:
+        # When only one component is possible, show each cluster along PC1
+        for index, cluster in enumerate(clusters):
+            rows = frame[frame["cluster"].astype(str) == cluster]
+            y = np.full(len(rows), index, dtype=float)
+            label = "Noise" if cluster == "-1" else f"Cluster {cluster}"
+            plt.scatter(
+                rows["PC1"],
+                y,
+                label=label,
+                alpha=0.85,
+                color=cmap(index % 10),
+            )
+        plt.yticks(range(len(clusters)), [
+            "Noise" if value == "-1" else f"Cluster {value}"
+            for value in clusters
+        ])
+        plt.xlabel("Principal component 1")
+        plt.ylabel("Cluster")
+        plt.title("One-Dimensional Cluster Distribution")
+
+    plt.grid(alpha=0.22)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(path, dpi=160)
+    plt.close()
+    return True
+
+
 def _build_ssl_progress_chart(progress_rows, path):
     if not progress_rows:
         return False
     frame = pd.DataFrame(progress_rows)
-    if not {"description", "percentage"}.issubset(frame.columns):
+    label_column = "description" if "description" in frame.columns else "status"
+    if label_column not in frame.columns or "percentage" not in frame.columns:
         return False
 
+    frame["percentage"] = pd.to_numeric(frame["percentage"], errors="coerce")
+    frame = frame.dropna(subset=["percentage"])
+    if frame.empty:
+        return False
     plt.figure(figsize=(8, 4.8))
-    plt.barh(frame["description"].astype(str), frame["percentage"], color="#7c3aed")
+    plt.barh(frame[label_column].astype(str), frame["percentage"], color="#7c3aed")
     plt.title("Self-Training Progress")
     plt.xlabel("Percentage")
     plt.xlim(0, 100)
@@ -251,26 +333,217 @@ def _build_ssl_progress_chart(progress_rows, path):
     return True
 
 
-def _build_roc_curve_chart(y_true, y_score, path):
-    if y_true is None or y_score is None:
-        return False
-    y_true = np.array(y_true)
-    y_score = np.array(y_score)
-    labels = np.unique(y_true)
-    if len(labels) != 2:
+def _normalize_ssl_iteration_frame(progress_rows):
+    """Return a numeric, consistently named SSL iteration progress frame."""
+    if not progress_rows:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(progress_rows).copy()
+    if "iteration" not in frame.columns:
+        return pd.DataFrame()
+
+    aliases = {
+        "pseudo_labeled_percentage": [
+            "pseudo_labeled_percentage",
+            "cumulative_pseudo_labeled_percentage",
+            "percentage",
+        ],
+        "remaining_unlabeled_percentage": [
+            "remaining_unlabeled_percentage",
+            "remaining_percentage",
+        ],
+        "cumulative_pseudo_labeled": [
+            "cumulative_pseudo_labeled",
+            "pseudo_labeled_total",
+        ],
+    }
+    for target, candidates in aliases.items():
+        if target not in frame.columns:
+            for candidate in candidates:
+                if candidate in frame.columns:
+                    frame[target] = frame[candidate]
+                    break
+
+    numeric_columns = [
+        "iteration",
+        "newly_pseudo_labeled",
+        "cumulative_pseudo_labeled",
+        "remaining_unlabeled",
+        "pseudo_labeled_percentage",
+        "remaining_unlabeled_percentage",
+    ]
+    for column in numeric_columns:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+
+    frame = frame.dropna(subset=["iteration"]).sort_values("iteration")
+    return frame.reset_index(drop=True)
+
+
+def _build_ssl_iteration_progress_chart(progress_rows, path):
+    """Plot cumulative pseudo-labeling and remaining percentages by iteration."""
+    frame = _normalize_ssl_iteration_frame(progress_rows)
+    if frame.empty or "pseudo_labeled_percentage" not in frame.columns:
         return False
 
-    if y_score.ndim > 1:
-        y_score = y_score[:, -1]
-    fpr, tpr, _ = roc_curve(y_true, y_score, pos_label=labels[-1])
-    roc_auc = auc(fpr, tpr)
+    frame = frame.dropna(subset=["pseudo_labeled_percentage"])
+    if frame.empty:
+        return False
+
+    labels = frame.get("description", frame["iteration"].astype(int).astype(str)).astype(str)
+    plt.figure(figsize=(8.4, 4.8))
+    plt.plot(
+        labels,
+        frame["pseudo_labeled_percentage"],
+        marker="o",
+        color="#2563eb",
+        label="Pseudo-labeled",
+    )
+    if "remaining_unlabeled_percentage" in frame.columns:
+        remaining = frame["remaining_unlabeled_percentage"]
+        if remaining.notna().any():
+            plt.plot(
+                labels,
+                remaining,
+                marker="o",
+                color="#dc2626",
+                label="Remaining unlabeled",
+            )
+
+    plt.title("Self-Training Progress by Iteration")
+    plt.xlabel("Iteration")
+    plt.ylabel("Percentage of originally unlabeled rows")
+    plt.ylim(0, 100)
+    plt.xticks(rotation=20, ha="right")
+    plt.grid(axis="y", alpha=0.25)
+    plt.legend(frameon=False)
+    plt.tight_layout()
+    plt.savefig(path, dpi=160)
+    plt.close()
+    return True
+
+
+def _build_ssl_iteration_table(progress_rows, path):
+    """Render the complete SSL iteration history as a report table image."""
+    frame = _normalize_ssl_iteration_frame(progress_rows)
+    if frame.empty:
+        return False
+
+    ordered = [
+        "iteration",
+        "description",
+        "newly_pseudo_labeled",
+        "cumulative_pseudo_labeled",
+        "remaining_unlabeled",
+        "pseudo_labeled_percentage",
+        "remaining_unlabeled_percentage",
+    ]
+    columns = [column for column in ordered if column in frame.columns]
+    display = frame[columns].copy()
+    display = display.rename(columns={
+        "iteration": "Iteration",
+        "description": "Description",
+        "newly_pseudo_labeled": "New",
+        "cumulative_pseudo_labeled": "Cumulative",
+        "remaining_unlabeled": "Remaining",
+        "pseudo_labeled_percentage": "Pseudo-labeled %",
+        "remaining_unlabeled_percentage": "Remaining %",
+    })
+    for column in ["Pseudo-labeled %", "Remaining %"]:
+        if column in display.columns:
+            display[column] = display[column].map(
+                lambda value: "" if pd.isna(value) else f"{float(value):.1f}%"
+            )
+    for column in ["Iteration", "New", "Cumulative", "Remaining"]:
+        if column in display.columns:
+            display[column] = display[column].map(
+                lambda value: "" if pd.isna(value) else str(int(value))
+            )
+
+    width = max(9.0, 1.35 * len(display.columns))
+    height = max(2.8, 0.48 * (len(display) + 2))
+    fig, axis = plt.subplots(figsize=(width, height))
+    axis.axis("off")
+    table = axis.table(
+        cellText=display.astype(str).values,
+        colLabels=list(display.columns),
+        loc="center",
+        cellLoc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 1.35)
+    axis.set_title("SSL Iteration Progress Details", pad=12)
+    fig.tight_layout()
+    fig.savefig(path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
+def _clean_binary_chart_data(y_true, y_score):
+    """Clean labels and scores used by binary classification report charts."""
+    if y_true is None or y_score is None:
+        return None, None, None
+
+    true_series = pd.Series(list(y_true)).reset_index(drop=True)
+    score_array = np.asarray(y_score)
+
+    if score_array.ndim == 0 or len(true_series) != len(score_array):
+        return None, None, None
+
+    valid_mask = true_series.notna().to_numpy()
+    if not valid_mask.any():
+        return None, None, None
+
+    cleaned_true = (
+        true_series.loc[valid_mask]
+        .astype(str)
+        .reset_index(drop=True)
+        .to_numpy()
+    )
+    cleaned_score = score_array[valid_mask]
+
+    labels = np.unique(cleaned_true)
+    if len(labels) != 2:
+        return None, None, None
+
+    if cleaned_score.ndim > 1:
+        if cleaned_score.shape[1] < 2:
+            return None, None, None
+        cleaned_score = cleaned_score[:, -1]
+
+    cleaned_score = pd.to_numeric(
+        pd.Series(cleaned_score), errors="coerce"
+    ).to_numpy(dtype=float)
+    score_mask = np.isfinite(cleaned_score)
+    cleaned_true = cleaned_true[score_mask]
+    cleaned_score = cleaned_score[score_mask]
+
+    if len(cleaned_true) == 0 or np.unique(cleaned_true).size != 2:
+        return None, None, None
+
+    positive_label = labels[-1]
+    binary_true = (cleaned_true == positive_label).astype(int)
+    return binary_true, cleaned_score, positive_label
+
+
+def _build_roc_curve_chart(y_true, y_score, path):
+    binary_true, score, positive_label = _clean_binary_chart_data(y_true, y_score)
+    if binary_true is None:
+        return False
+
+    try:
+        fpr, tpr, _ = roc_curve(binary_true, score)
+        roc_auc = auc(fpr, tpr)
+    except (TypeError, ValueError):
+        return False
 
     plt.figure(figsize=(6.8, 5.2))
     plt.plot(fpr, tpr, color="#1f7a8c", label=f"ROC AUC = {roc_auc:.4f}")
     plt.plot([0, 1], [0, 1], "--", color="#9ca3af")
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")
-    plt.title("ROC Curve")
+    plt.title(f"ROC Curve (positive class: {positive_label})")
     plt.legend(loc="lower right", frameon=False)
     plt.grid(alpha=0.3)
     plt.tight_layout()
@@ -280,24 +553,21 @@ def _build_roc_curve_chart(y_true, y_score, path):
 
 
 def _build_pr_curve_chart(y_true, y_score, path):
-    if y_true is None or y_score is None:
-        return False
-    y_true = np.array(y_true)
-    y_score = np.array(y_score)
-    labels = np.unique(y_true)
-    if len(labels) != 2:
+    binary_true, score, positive_label = _clean_binary_chart_data(y_true, y_score)
+    if binary_true is None:
         return False
 
-    if y_score.ndim > 1:
-        y_score = y_score[:, -1]
-    precision, recall, _ = precision_recall_curve(y_true, y_score, pos_label=labels[-1])
-    pr_auc = auc(recall, precision)
+    try:
+        precision, recall, _ = precision_recall_curve(binary_true, score)
+        pr_auc = auc(recall, precision)
+    except (TypeError, ValueError):
+        return False
 
     plt.figure(figsize=(6.8, 5.2))
     plt.plot(recall, precision, color="#7c3aed", label=f"PR AUC = {pr_auc:.4f}")
     plt.xlabel("Recall")
     plt.ylabel("Precision")
-    plt.title("Precision-Recall Curve")
+    plt.title(f"Precision-Recall Curve (positive class: {positive_label})")
     plt.legend(loc="lower left", frameon=False)
     plt.grid(alpha=0.3)
     plt.tight_layout()
@@ -413,25 +683,21 @@ def _build_accuracy_vs_k_chart(X, y, path):
 
 
 def _build_calibration_curve_chart(y_true, y_score, path):
-    if y_true is None or y_score is None:
+    binary_true, score, positive_label = _clean_binary_chart_data(y_true, y_score)
+    if binary_true is None:
         return False
-    y_true = np.array(y_true)
-    labels = np.unique(y_true)
-    if len(labels) != 2:
-        return False
-    score = np.array(y_score)
-    if score.ndim > 1:
-        score = score[:, -1]
 
-    frac_pos, mean_pred = calibration_curve((y_true == labels[-1]).astype(int), score, n_bins=10)
+    try:
+        frac_pos, mean_pred = calibration_curve(binary_true, score, n_bins=10)
+    except (TypeError, ValueError):
+        return False
 
     plt.figure(figsize=(6.8, 5.2))
-    plt.plot(mean_pred, frac_pos, marker="o", color="#9333ea", label="Model")
-    plt.plot([0, 1], [0, 1], "--", color="#9ca3af", label="Perfect")
-    plt.xlabel("Mean Predicted Probability")
-    plt.ylabel("Fraction of Positives")
-    plt.title("Calibration Curve")
-    plt.legend(frameon=False)
+    plt.plot(mean_pred, frac_pos, marker="o", color="#0f766e")
+    plt.plot([0, 1], [0, 1], "--", color="#9ca3af")
+    plt.xlabel("Mean predicted probability")
+    plt.ylabel("Fraction of positives")
+    plt.title(f"Calibration Curve (positive class: {positive_label})")
     plt.grid(alpha=0.3)
     plt.tight_layout()
     plt.savefig(path, dpi=160)
@@ -821,7 +1087,10 @@ def generate_model_report_assets(model_record, output_root, include_pdf=True):
     confusion_matrix = model_record.get("confusion_matrix")
     confusion_labels = model_record.get("confusion_labels")
     cluster_summary = model_record.get("cluster_summary")
+    cluster_plot_data = model_record.get("cluster_plot_data")
+    cluster_plot_components = model_record.get("cluster_plot_components")
     ssl_progress = model_record.get("ssl_progress")
+    ssl_iteration_progress = model_record.get("ssl_iteration_progress")
     model_obj = model_record.get("model")
     feature_columns = model_record.get("feature_columns", [])
     category = str(model_record.get("category", ""))
@@ -839,10 +1108,36 @@ def generate_model_report_assets(model_record, output_root, include_pdf=True):
     base_builders = [
         ("metrics.png", lambda p: _build_metrics_chart(metrics, p)),
         ("confusion_matrix.png", lambda p: _build_confusion_chart(confusion_matrix, confusion_labels, p)),
+        # These model-type summaries do not require supervised correlation data.
+        ("cluster_summary.png", lambda p: _build_cluster_summary_chart(cluster_summary, p)),
+        (
+            "cluster_plot.png",
+            lambda p: _build_cluster_plot(
+                cluster_plot_data, cluster_plot_components, p
+            ),
+        ),
+        ("ssl_progress.png", lambda p: _build_ssl_progress_chart(ssl_progress, p)),
+        (
+            "ssl_iteration_progress.png",
+            lambda p: _build_ssl_iteration_progress_chart(
+                ssl_iteration_progress, p
+            ),
+        ),
+        (
+            "ssl_iteration_table.png",
+            lambda p: _build_ssl_iteration_table(
+                ssl_iteration_progress, p
+            ),
+        ),
     ]
     for filename, builder in base_builders:
         candidate = report_dir / filename
-        if builder(candidate):
+        try:
+            created = builder(candidate)
+        except Exception as error:
+            print(f"Skipped report chart {filename}: {error}")
+            created = False
+        if created:
             image_paths.append(candidate)
 
     if not correlated:
@@ -858,8 +1153,6 @@ def generate_model_report_assets(model_record, output_root, include_pdf=True):
         ("feature_importance.png", lambda p: _build_feature_importance_chart(model_obj, feature_columns, p)),
         ("coefficient_magnitude.png", lambda p: _build_coefficients_chart(model_obj, feature_columns, p)),
         ("loss.png", lambda p: _build_loss_chart(model_obj, p)),
-        ("cluster_summary.png", lambda p: _build_cluster_summary_chart(cluster_summary, p)),
-        ("ssl_progress.png", lambda p: _build_ssl_progress_chart(ssl_progress, p)),
         ("roc_curve.png", lambda p: _build_roc_curve_chart(y_true, y_score, p)),
         ("precision_recall_curve.png", lambda p: _build_pr_curve_chart(y_true, y_score, p)),
         ("learning_curve.png", lambda p: _build_learning_curve_chart(model_obj, X, y, p)),
@@ -868,7 +1161,12 @@ def generate_model_report_assets(model_record, output_root, include_pdf=True):
 
     for filename, builder in generic_builders:
         candidate = report_dir / filename
-        if builder(candidate):
+        try:
+            created = builder(candidate)
+        except Exception as error:
+            print(f"Skipped report chart {filename}: {error}")
+            created = False
+        if created:
             image_paths.append(candidate)
 
     validation_param_map = {

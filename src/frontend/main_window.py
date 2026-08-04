@@ -61,7 +61,13 @@ from src.analysis.analysis import (
     mutual_information_analysis,
     pca_analysis,
 )
-from src.data.process import load_project, save_project
+from src.data.process import (
+    create_model_package,
+    load_project,
+    make_json_safe,
+    save_project,
+    unpack_model_package,
+)
 from src.model.model_registry import add_model, delete_model
 from src.model.model_training import test_models_current_data
 from src.model.model_utils import validate_dataset, prepare_training_data
@@ -107,6 +113,7 @@ from src.model.model_training import evaluate_saved_models
 from src.model.semisupervised_model import run_ssl_workflow
 from src.model.unsupervised_model import run_unsupervised_workflow
 from src.model.model_controller import ModelController
+from src.model.model_factory import build_model
 from src.model.result_builders import (
     export_model_report,
     generate_model_report_assets,
@@ -270,21 +277,56 @@ class UnifiedModelTrainingWorker(QRunnable):
             elif category == "semi_supervised":
                 base_name = parameters.get("base_model_name", "")
                 base_model_info = next(
-                    (model for model in self.saved_models if model.get("display_name") == base_name),
+                    (
+                        model
+                        for model in self.saved_models
+                        if model.get("display_name") == base_name
+                        and model.get("category") == "supervised"
+                    ),
                     None,
                 )
-                if base_model_info is None:
-                    raise ValueError(
-                        "Semi-supervised model requires required parameter 'base_model_name' matching a trained model."
+                use_pretrained_state = base_model_info is not None
+                base_features = None
+
+                if base_model_info is not None:
+                    # Transfer the fitted supervised model into SSL. Its fitted state seeds the first auto-labeling pass before iterative retraining begins
+                    base_model = base_model_info["model"]
+                    base_features = base_model_info.get("feature_columns") or None
+                elif base_name in {
+                    "logistic_regression",
+                    "random_forest",
+                    "decision_tree",
+                    "knn",
+                    "svm",
+                }:
+
+                    base_model = build_model(
+                        base_name,
+                        parameters={},
+                        random_state=int(common.get("random_state", 42)),
                     )
+                else:
+                    raise ValueError(
+                        "Select a built-in supervised base model or a trained supervised model."
+                    )
+
                 result = run_ssl_workflow(
                     train_df=self.dataframe,
                     test_df=self.dataframe,
                     label=self.label_column,
-                    pretrained_model=base_model_info["model"],
+                    pretrained_model=base_model,
+                    features=base_features,
                     threshold=float(parameters.get("threshold", 0.9)),
                     max_iter=int(parameters.get("max_iter", 10)),
+                    criterion=parameters.get("criterion", "threshold"),
+                    k_best=int(parameters.get("k_best", 10)),
+                    test_size=float(common.get("test_size", 0.3)),
+                    random_state=int(common.get("random_state", 42)),
                     verbose=bool(common.get("verbose", False)),
+                    use_pretrained_state=use_pretrained_state,
+                )
+                parameters["pretrained_state_used"] = bool(
+                    getattr(result["ssl_model"], "pretrained_state_used_", False)
                 )
                 payload = {
                     "name": self.added_model_entry["name"],
@@ -1715,6 +1757,7 @@ class AnalyticsWindow(QMainWindow):
         self.results_model = PandasTableModel()
         self.result_details_model = PandasTableModel()
         self.result_confusion_model = PandasTableModel()
+        self.result_ssl_iteration_model = PandasTableModel()
 
         results_view = QWidget()
         results_layout = QVBoxLayout(results_view)
@@ -1727,9 +1770,30 @@ class AnalyticsWindow(QMainWindow):
         results_layout.addWidget(self.results_table, 2)
         details_layout = QHBoxLayout()
         details_layout.setSpacing(16)
-        details_layout.addWidget(data_panel("TRAINING INFO", self.result_details_model), 1)
-        details_layout.addWidget(data_panel("CONFUSION MATRIX", self.result_confusion_model), 1)
+        self.result_training_panel = data_panel(
+            "TRAINING INFO", self.result_details_model
+        )
+        details_layout.addWidget(self.result_training_panel, 1)
+
+        # The right-hand panel changes with the learning category
+        self.result_secondary_panel = QWidget()
+        secondary_layout = QVBoxLayout(self.result_secondary_panel)
+        secondary_layout.setContentsMargins(0, 0, 0, 0)
+        secondary_layout.setSpacing(6)
+        self.result_secondary_title = QLabel("CONFUSION MATRIX")
+        self.result_secondary_title.setProperty("panelTitle", True)
+        secondary_layout.addWidget(self.result_secondary_title)
+        self.result_secondary_table = table_view(self.result_confusion_model)
+        secondary_layout.addWidget(self.result_secondary_table)
+        details_layout.addWidget(self.result_secondary_panel, 1)
         results_layout.addLayout(details_layout, 1)
+
+        # Self-training iteration history is SSL-specific
+        self.result_ssl_iteration_panel = data_panel(
+            "SSL ITERATION PROGRESS", self.result_ssl_iteration_model
+        )
+        self.result_ssl_iteration_panel.setVisible(False)
+        results_layout.addWidget(self.result_ssl_iteration_panel, 1)
 
         comparison_view = QWidget()
         comparison_layout = QVBoxLayout(comparison_view)
@@ -1988,6 +2052,23 @@ class AnalyticsWindow(QMainWindow):
         if not isinstance(result, dict):
             return snapshot
 
+        # Preserve metrics and prediction context so saved projects and exported modelcan restore previously evaluated results
+        metrics = result.get("metrics")
+        if isinstance(metrics, dict):
+            snapshot["metrics"] = make_json_safe(metrics)
+
+        for source_key, snapshot_key in (
+            ("predictions", "predictions"),
+            ("y_test", "y_true"),
+            ("y_true", "y_true"),
+            ("y_score", "y_score"),
+        ):
+            if source_key in result and result.get(source_key) is not None:
+                try:
+                    snapshot[snapshot_key] = make_json_safe(result.get(source_key))
+                except Exception:
+                    pass
+
         matrix = result.get("confusion_matrix")
         if matrix is not None:
             try:
@@ -1996,21 +2077,71 @@ class AnalyticsWindow(QMainWindow):
                     snapshot["confusion_matrix"] = matrix_df.fillna(0).astype(int).values.tolist()
                     if "y_test" in result:
                         labels = [str(label) for label in sorted(pd.unique(result["y_test"]))]
+                    elif getattr(result.get("ssl_model"), "classes_", None) is not None:
+                        labels = [str(label) for label in result["ssl_model"].classes_]
                     else:
                         labels = [str(index) for index in range(matrix_df.shape[0])]
                     snapshot["confusion_labels"] = labels
             except Exception:
                 pass
 
+        # Preserve the overall SSL counts and the each iteration history separately
+        if "progress_df" in result:
+            try:
+                snapshot["ssl_progress"] = pd.DataFrame(result["progress_df"]).to_dict(orient="records")
+            except Exception:
+                pass
+
         if "iteration_progress" in result:
             try:
-                snapshot["ssl_progress"] = pd.DataFrame(result["iteration_progress"]).to_dict(orient="records")
+                snapshot["ssl_iteration_progress"] = pd.DataFrame(
+                    result["iteration_progress"]
+                ).to_dict(orient="records")
+            except Exception:
+                pass
+
+        # Preserve the export-ready SSL dataset so it remains available after
+        # project save/reload and inside the self-contained model PKL package.
+        if "ssl_export_df" in result:
+            try:
+                snapshot["ssl_export_data"] = pd.DataFrame(
+                    result["ssl_export_df"]
+                ).to_dict(orient="records")
             except Exception:
                 pass
 
         if "summary_df" in result:
             try:
-                snapshot["cluster_summary"] = pd.DataFrame(result["summary_df"]).to_dict(orient="records")
+                snapshot["cluster_summary"] = pd.DataFrame(
+                    result["summary_df"]
+                ).to_dict(orient="records")
+            except Exception:
+                pass
+
+        # Preserve the original dataset with its fitted cluster assignment 
+        if "clustered_df" in result:
+            try:
+                clustered_export = pd.DataFrame(result["clustered_df"]).copy()
+                if "cluster" in clustered_export.columns:
+                    clustered_export["cluster_description"] = clustered_export[
+                        "cluster"
+                    ].map(lambda value: "Noise" if value == -1 else "Cluster")
+                snapshot["clustered_export_data"] = clustered_export.to_dict(
+                    orient="records"
+                )
+            except Exception:
+                pass
+
+        # PCA coordinates are report data only
+        if "pca_result" in result:
+            try:
+                pca_result = result.get("pca_result") or {}
+                snapshot["cluster_plot_data"] = pd.DataFrame(
+                    pca_result.get("pca_df", pd.DataFrame())
+                ).to_dict(orient="records")
+                snapshot["cluster_plot_components"] = int(
+                    pca_result.get("actual_components", 2)
+                )
             except Exception:
                 pass
 
@@ -2043,6 +2174,8 @@ class AnalyticsWindow(QMainWindow):
                     "confusion_labels": payload.get("confusion_labels"),
                     "cluster_summary": payload.get("cluster_summary"),
                     "ssl_progress": payload.get("ssl_progress"),
+                    "ssl_iteration_progress": payload.get("ssl_iteration_progress"),
+                    "ssl_export_data": payload.get("ssl_export_data"),
                 },
                 "source": f"exported:{json_path.name}",
                 "trained": True,
@@ -2074,7 +2207,12 @@ class AnalyticsWindow(QMainWindow):
                     "label": added.get("label", self.project.get("label_column", "")),
                     "algorithm": model.get("algorithm", ""),
                     "category": model.get("category") or added.get("category", ""),
-                    "metrics": model.get("metrics", {}),
+                    "metrics": (
+                        model.get("metrics")
+                        or (model.get("evaluation", {}) or {}).get("metrics")
+                        or added.get("metrics")
+                        or {}
+                    ),
                     "parameters": model.get("parameters", {}),
                     "common_parameters": added.get("common_parameters", {}),
                     "required_parameters": added.get("required_parameters", {}),
@@ -2089,12 +2227,18 @@ class AnalyticsWindow(QMainWindow):
         return records
 
     def _records_to_table_rows(self, records):
+        """Create one shared results table while leaving invalid metrics blank."""
         rows = []
         for record in records:
-            metrics = record.get("metrics", {})
+            metrics = record.get("metrics", {}) or {}
+            evaluation = record.get("evaluation", {}) or {}
+            ssl_counts = {
+                str(item.get("status", "")): item.get("count")
+                for item in evaluation.get("ssl_progress", []) or []
+            }
             rows.append({
                 "name": record.get("name", ""),
-                "label": record.get("label", ""),
+                "label": record.get("label") or "N/A",
                 "source": record.get("source", "project"),
                 "category": record.get("category", ""),
                 "algorithm": record.get("algorithm", ""),
@@ -2102,6 +2246,14 @@ class AnalyticsWindow(QMainWindow):
                 "precision": self._round_metric(metrics.get("precision")),
                 "recall": self._round_metric(metrics.get("recall")),
                 "f1": self._round_metric(metrics.get("f1")),
+                "silhouette": self._round_metric(metrics.get("silhouette_score")),
+                "davies_bouldin": self._round_metric(metrics.get("davies_bouldin_score")),
+                "calinski_harabasz": self._round_metric(metrics.get("calinski_harabasz_score")),
+                "clusters": metrics.get("cluster_count"),
+                "noise": metrics.get("noise_count"),
+                "originally_unlabeled": ssl_counts.get("Originally unlabeled"),
+                "pseudo_labeled": ssl_counts.get("Pseudo-labeled"),
+                "remaining_unlabeled": ssl_counts.get("Remaining unlabeled"),
             })
         return rows
 
@@ -2112,7 +2264,13 @@ class AnalyticsWindow(QMainWindow):
         rows = self._records_to_table_rows(records)
         table = pd.DataFrame(
             rows,
-            columns=["name", "label", "source", "category", "algorithm", "accuracy", "precision", "recall", "f1"],
+            columns=[
+                "name", "label", "source", "category", "algorithm",
+                "accuracy", "precision", "recall", "f1",
+                "silhouette", "davies_bouldin", "calinski_harabasz",
+                "clusters", "noise", "originally_unlabeled",
+                "pseudo_labeled", "remaining_unlabeled",
+            ],
         )
         self.results_model.set_data(table)
         self._comparison_records = list(records)
@@ -2120,6 +2278,9 @@ class AnalyticsWindow(QMainWindow):
         self._clear_comparison_images()
         self.result_details_model.set_data(pd.DataFrame())
         self.result_confusion_model.set_data(pd.DataFrame())
+        self.result_ssl_iteration_model.set_data(pd.DataFrame())
+        self.result_ssl_iteration_panel.setVisible(False)
+        self.result_secondary_title.setText("CONFUSION MATRIX")
 
     def on_result_selection_changed(self, selected, deselected):
         del selected, deselected
@@ -2127,22 +2288,135 @@ class AnalyticsWindow(QMainWindow):
         if not indexes or not self._result_records:
             self.result_details_model.set_data(pd.DataFrame())
             self.result_confusion_model.set_data(pd.DataFrame())
+            self.result_ssl_iteration_model.set_data(pd.DataFrame())
+            self.result_ssl_iteration_panel.setVisible(False)
+            self.result_secondary_title.setText("CONFUSION MATRIX")
             return
         name = self.results_model._data.iloc[indexes[0].row()]["name"]
         model = next((item for item in self._result_records if item.get("name") == name), {})
+        category = model.get("category", "")
         details = [
             ("source", model.get("source", "")),
-            ("label", model.get("label", "")),
-            ("category", model.get("category", "")),
+            ("label", model.get("label") or "N/A"),
+            ("category", category),
             ("algorithm", model.get("algorithm", "")),
             ("features", ", ".join(model.get("feature_columns", []))),
         ]
-        details.extend((f"common: {key}", value) for key, value in model.get("common_parameters", {}).items())
-        details.extend((f"required: {key}", value) for key, value in model.get("required_parameters", {}).items())
-        details.extend((f"advanced: {key}", value) for key, value in model.get("advanced_parameters", {}).items())
-        self.result_details_model.set_data(pd.DataFrame(details, columns=["field", "value"]))
+
+        is_ssl = category == "semi_supervised"
+        self.result_ssl_iteration_panel.setVisible(is_ssl)
+        if not is_ssl:
+            self.result_ssl_iteration_model.set_data(pd.DataFrame())
+        common_parameters = model.get("common_parameters", {}) or {}
+        relevant_common = {
+            "supervised": {"test_size", "verbose", "random_state", "stratify"},
+            "semi_supervised": {"test_size", "verbose", "random_state", "stratify"},
+            "unsupervised": {"verbose", "random_state"},
+        }.get(category, set(common_parameters))
+        details.extend(
+            (f"common: {key}", value)
+            for key, value in common_parameters.items()
+            if key in relevant_common
+        )
+
+        required_parameters = model.get("required_parameters", {}) or {}
+        criterion = required_parameters.get("criterion") or (
+            model.get("advanced_parameters", {}) or {}
+        ).get("criterion")
+        for key, value in required_parameters.items():
+            if category == "semi_supervised":
+                if key == "threshold" and criterion == "k_best":
+                    continue
+                if key == "k_best" and criterion != "k_best":
+                    continue
+            details.append((f"required: {key}", value))
+
+        for key, value in (model.get("advanced_parameters", {}) or {}).items():
+            if category == "semi_supervised":
+                if key == "threshold" and criterion == "k_best":
+                    continue
+                if key == "k_best" and criterion != "k_best":
+                    continue
+            details.append((f"advanced: {key}", value))
+
+        for key, value in (model.get("metrics", {}) or {}).items():
+            if value is not None and key != "note":
+                details.append((f"metric: {key}", self._round_metric(value)))
 
         evaluation = model.get("evaluation", {}) or {}
+        if category == "semi_supervised":
+            model_obj = model.get("model")
+            if model_obj is not None:
+                details.append((
+                    "SSL: Pretrained state used",
+                    bool(getattr(model_obj, "pretrained_state_used_", False)),
+                ))
+
+            for item in evaluation.get("ssl_progress", []) or []:
+                count = item.get("count", "")
+                percentage = item.get("percentage")
+                value = (
+                    f"{count} ({float(percentage):.1f}%)"
+                    if percentage is not None
+                    else count
+                )
+                details.append((f"SSL: {item.get('status', '')}", value))
+
+            iteration_rows = []
+            for item in evaluation.get("ssl_iteration_progress", []) or []:
+                iteration_rows.append({
+                    "iteration": item.get("iteration", ""),
+                    "description": item.get(
+                        "description", f"Iteration {item.get('iteration', '')}"
+                    ),
+                    "newly_pseudo_labeled": item.get(
+                        "newly_pseudo_labeled", item.get("count", "")
+                    ),
+                    "cumulative_pseudo_labeled": item.get(
+                        "cumulative_pseudo_labeled",
+                        item.get("pseudo_labeled_total", ""),
+                    ),
+                    "remaining_unlabeled": item.get(
+                        "remaining_unlabeled", ""
+                    ),
+                    "pseudo_labeled_percentage": item.get("percentage", ""),
+                    "remaining_unlabeled_percentage": item.get(
+                        "remaining_percentage", ""
+                    ),
+                })
+            self.result_ssl_iteration_model.set_data(pd.DataFrame(
+                iteration_rows,
+                columns=[
+                    "iteration",
+                    "description",
+                    "newly_pseudo_labeled",
+                    "cumulative_pseudo_labeled",
+                    "remaining_unlabeled",
+                    "pseudo_labeled_percentage",
+                    "remaining_unlabeled_percentage",
+                ],
+            ))
+
+        self.result_details_model.set_data(
+            pd.DataFrame(details, columns=["field", "value"])
+        )
+
+        if category == "unsupervised":
+            # Reuse this panel for the cluster summary instead
+            self.result_secondary_title.setText("CLUSTER SUMMARY")
+            summary = pd.DataFrame(evaluation.get("cluster_summary", []) or [])
+            if not summary.empty:
+                preferred = [
+                    column
+                    for column in ["cluster", "description", "count"]
+                    if column in summary.columns
+                ]
+                if preferred:
+                    summary = summary[preferred]
+            self.result_confusion_model.set_data(summary)
+            return
+
+        self.result_secondary_title.setText("CONFUSION MATRIX")
         matrix = evaluation.get("confusion_matrix")
         labels = evaluation.get("confusion_labels")
         if matrix:
@@ -2168,7 +2442,173 @@ class AnalyticsWindow(QMainWindow):
         menu.addAction("View Report Images", self.view_selected_result_report_images)
         menu.addSeparator()
         menu.addAction("Export Model Report", self.export_selected_model_reports)
+
+        # Dataset export is learning category specific 
+        record = self._selected_result_record()
+        if record and record.get("category") == "semi_supervised":
+            menu.addAction("Export SSL Dataset", self.export_selected_ssl_dataset)
+        elif record and record.get("category") == "unsupervised":
+            menu.addAction(
+                "Export Clustered Dataset",
+                self.export_selected_clustered_dataset,
+            )
+
         menu.exec(self.results_table.viewport().mapToGlobal(position))
+
+    def export_selected_ssl_dataset(self):
+        """Export the selected SSL model's self-training dataset.
+        Original labels remain unchanged, accepted pseudo-labels are inserted,
+        and samples rejected by ``SelfTrainingClassifier`` stay unlabeled. The
+        added source and iteration columns provide an audit trail.
+        """
+        record = self._selected_result_record()
+        if not record or record.get("category") != "semi_supervised":
+            QMessageBox.warning(
+                self,
+                "SSL Model Required",
+                "Select a trained semi-supervised model before exporting.",
+            )
+            return
+
+        evaluation = record.get("evaluation", {}) or {}
+        export_data = evaluation.get("ssl_export_data")
+
+        if not export_data:
+            model = record.get("model")
+            export_frame = getattr(model, "ssl_export_df_", None)
+            if isinstance(export_frame, pd.DataFrame):
+                export_data = export_frame.to_dict(orient="records")
+
+        if not export_data:
+            QMessageBox.warning(
+                self,
+                "SSL Dataset Unavailable",
+                "This SSL result does not contain row-mapping data. Retrain the "
+                "model with the current version, then export again.",
+            )
+            return
+
+        export_df = pd.DataFrame(export_data)
+        if export_df.empty:
+            QMessageBox.warning(
+                self,
+                "SSL Dataset Unavailable",
+                "The saved SSL export dataset is empty.",
+            )
+            return
+
+        safe_name = "".join(
+            character if character.isalnum() or character in "-_" else "_"
+            for character in str(record.get("name", "ssl_model"))
+        ).strip("_") or "ssl_model"
+
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export SSL Dataset",
+            str(self.downloads_dir / f"{safe_name}_ssl_dataset.csv"),
+            "CSV Files (*.csv);;Excel Files (*.xlsx)",
+        )
+        if not path:
+            return
+
+        output_path = Path(path)
+        if "Excel" in selected_filter and output_path.suffix.lower() != ".xlsx":
+            output_path = output_path.with_suffix(".xlsx")
+        elif "CSV" in selected_filter and output_path.suffix.lower() != ".csv":
+            output_path = output_path.with_suffix(".csv")
+
+        try:
+            if output_path.suffix.lower() == ".xlsx":
+                export_df.to_excel(output_path, index=False)
+            else:
+                export_df.to_csv(output_path, index=False)
+        except Exception as error:
+            self.show_error("SSL Dataset Export Error", error)
+            return
+
+        QMessageBox.information(
+            self,
+            "SSL Dataset Exported",
+            f"The SSL dataset was exported to:\n{output_path}",
+        )
+
+
+    def export_selected_clustered_dataset(self):
+        """Export the selected clustering result with cluster assignments.
+        The original dataset columns are preserved. A cluster column stores
+        the fitted assignment and cluster_description identifies DBSCAN
+        noise without changing scikit-learn's standard -1 label.
+        """
+        record = self._selected_result_record()
+        if not record or record.get("category") != "unsupervised":
+            QMessageBox.warning(
+                self,
+                "Unsupervised Model Required",
+                "Select a trained unsupervised model before exporting.",
+            )
+            return
+
+        evaluation = record.get("evaluation", {}) or {}
+        export_data = evaluation.get("clustered_export_data")
+
+        if not export_data:
+            QMessageBox.warning(
+                self,
+                "Clustered Dataset Unavailable",
+                "This clustering result does not contain the original rows and "
+                "cluster assignments. Retrain the model with the current version, "
+                "then export again.",
+            )
+            return
+
+        export_df = pd.DataFrame(export_data)
+        if export_df.empty or "cluster" not in export_df.columns:
+            QMessageBox.warning(
+                self,
+                "Clustered Dataset Unavailable",
+                "The saved clustered dataset is empty or has no cluster column.",
+            )
+            return
+
+        if "cluster_description" not in export_df.columns:
+            export_df["cluster_description"] = export_df["cluster"].map(
+                lambda value: "Noise" if value == -1 else "Cluster"
+            )
+
+        safe_name = "".join(
+            character if character.isalnum() or character in "-_" else "_"
+            for character in str(record.get("name", "cluster_model"))
+        ).strip("_") or "cluster_model"
+
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Clustered Dataset",
+            str(self.downloads_dir / f"{safe_name}_clustered_dataset.csv"),
+            "CSV Files (*.csv);;Excel Files (*.xlsx)",
+        )
+        if not path:
+            return
+
+        output_path = Path(path)
+        if "Excel" in selected_filter and output_path.suffix.lower() != ".xlsx":
+            output_path = output_path.with_suffix(".xlsx")
+        elif "CSV" in selected_filter and output_path.suffix.lower() != ".csv":
+            output_path = output_path.with_suffix(".csv")
+
+        try:
+            if output_path.suffix.lower() == ".xlsx":
+                export_df.to_excel(output_path, index=False)
+            else:
+                export_df.to_csv(output_path, index=False)
+        except Exception as error:
+            self.show_error("Clustered Dataset Export Error", error)
+            return
+
+        QMessageBox.information(
+            self,
+            "Clustered Dataset Exported",
+            f"The clustered dataset was exported to:\n{output_path}",
+        )
 
     def _selected_result_record(self):
         rows = self.results_table.selectionModel().selectedRows()
@@ -2246,7 +2686,12 @@ class AnalyticsWindow(QMainWindow):
             "confusion_matrix": evaluation.get("confusion_matrix"),
             "confusion_labels": evaluation.get("confusion_labels"),
             "cluster_summary": evaluation.get("cluster_summary"),
+            "cluster_plot_data": evaluation.get("cluster_plot_data"),
+            "cluster_plot_components": evaluation.get(
+                "cluster_plot_components"
+            ),
             "ssl_progress": evaluation.get("ssl_progress"),
+            "ssl_iteration_progress": evaluation.get("ssl_iteration_progress"),
             "model": record.get("model"),
             "X": report_context.get("X"),
             "y": report_context.get("y"),
@@ -2274,19 +2719,33 @@ class AnalyticsWindow(QMainWindow):
         model_obj = record.get("model")
         label_col = self.project.get("label_column")
         feature_columns = record.get("feature_columns", [])
+        category = record.get("category", "supervised")
+        if category == "unsupervised":
+            return context
         if model_obj is None or not label_col:
             return context
         if label_col not in self.working_df.columns:
             return context
 
         try:
-            X_raw, y_values = prepare_training_data(
-                df=self.working_df,
-                label_col=label_col,
-                features=feature_columns if feature_columns else None,
-            )
-            expected = list(feature_columns) if feature_columns else list(X_raw.columns)
-            X = align_features(X_raw, expected, fill_value=0)
+            # Reports evaluate classifiers only on rows with known ground-truth labels
+            # SSL unlabeled rows belong in progress reporting
+            evaluation_df = self.working_df[self.working_df[label_col].notna()].copy()
+            if evaluation_df.empty:
+                return context
+
+            if category == "semi_supervised" or hasattr(model_obj, "features"):
+                expected = list(feature_columns) if feature_columns else [c for c in evaluation_df.columns if c != label_col]
+                X = evaluation_df[expected].copy()
+                y_values = evaluation_df[label_col].copy()
+            else:
+                X_raw, y_values = prepare_training_data(
+                    df=evaluation_df,
+                    label_col=label_col,
+                    features=feature_columns if feature_columns else None,
+                )
+                expected = list(feature_columns) if feature_columns else list(X_raw.columns)
+                X = align_features(X_raw, expected, fill_value=0)
         except Exception:
             return context
 
@@ -2500,11 +2959,17 @@ class AnalyticsWindow(QMainWindow):
                 y_true = report_context.get("y_true")
                 y_pred = report_context.get("y_pred")
                 try:
-                    labels = sorted(pd.unique(y_true))
-                    matrix = pd.crosstab(pd.Series(y_true, name="actual"), pd.Series(y_pred, name="predicted"), dropna=False)
+                    true_series = pd.Series(y_true).dropna().astype(str).reset_index(drop=True)
+                    pred_series = pd.Series(y_pred).iloc[:len(true_series)].astype(str).reset_index(drop=True)
+                    labels = sorted(set(true_series.tolist()) | set(pred_series.tolist()))
+                    matrix = pd.crosstab(
+                        true_series.rename("actual"),
+                        pred_series.rename("predicted"),
+                        dropna=False,
+                    )
                     matrix = matrix.reindex(index=labels, columns=labels, fill_value=0)
                     evaluation["confusion_matrix"] = matrix.values.tolist()
-                    evaluation["confusion_labels"] = [str(label) for label in labels]
+                    evaluation["confusion_labels"] = labels
                 except Exception:
                     pass
 
@@ -2518,7 +2983,12 @@ class AnalyticsWindow(QMainWindow):
                 "confusion_matrix": evaluation.get("confusion_matrix"),
                 "confusion_labels": evaluation.get("confusion_labels"),
                 "cluster_summary": evaluation.get("cluster_summary"),
+                "cluster_plot_data": evaluation.get("cluster_plot_data"),
+                "cluster_plot_components": evaluation.get(
+                    "cluster_plot_components"
+                ),
                 "ssl_progress": evaluation.get("ssl_progress"),
+                "ssl_iteration_progress": evaluation.get("ssl_iteration_progress"),
                 "model": record.get("model"),
                 "X": report_context.get("X"),
                 "y": report_context.get("y"),
@@ -3191,6 +3661,12 @@ class AnalyticsWindow(QMainWindow):
 
         ModelController.ensure_project_state(self.project)
         self.model_sidebar.set_project_label(self.project.get("label_column", ""))
+        trained_supervised = [
+            model.get("display_name", "")
+            for model in self.project.get("models", [])
+            if model.get("category") == "supervised" and model.get("display_name")
+        ]
+        self.model_sidebar.set_trained_supervised_models(trained_supervised)
         self.unified_model_page.set_added_models(self.project.get("added_models", []))
         self.unified_model_page.set_queue(ModelController.queue_rows(self.project))
 
@@ -3245,7 +3721,7 @@ class AnalyticsWindow(QMainWindow):
                 name=unique_name,
                 category=payload.get("category", "supervised"),
                 algorithm=payload.get("algorithm", "svm"),
-                label=self.project.get("label_column", ""),
+                label=str(self.project.get("label_column", "")),
                 common_parameters=payload.get("common_parameters", {}),
                 required_parameters=payload.get("required_parameters", {}),
                 advanced_parameters=payload.get("advanced_parameters", {}),
@@ -3378,11 +3854,16 @@ class AnalyticsWindow(QMainWindow):
                 "confusion_matrix": evaluation.get("confusion_matrix"),
                 "confusion_labels": evaluation.get("confusion_labels"),
                 "cluster_summary": evaluation.get("cluster_summary"),
+                "cluster_plot_data": evaluation.get("cluster_plot_data"),
+                "cluster_plot_components": evaluation.get(
+                    "cluster_plot_components"
+                ),
                 "ssl_progress": evaluation.get("ssl_progress"),
+                "ssl_iteration_progress": evaluation.get("ssl_iteration_progress"),
             }
             try:
                 with open(path, "w", encoding="utf-8") as file:
-                    json.dump(export_payload, file, indent=2)
+                    json.dump(make_json_safe(export_payload), file, indent=2)
             except Exception as error:
                 self.show_error("Export Error", error)
             return
@@ -3406,7 +3887,14 @@ class AnalyticsWindow(QMainWindow):
             if not path:
                 return
             try:
-                joblib.dump(saved["model"], path)
+                # Export one self-contained PKL package
+                # The fitted estimator, model metadata, metrics, SSL progress, clustering results and parameters 
+                package = create_model_package(
+                    saved,
+                    added_entry=entry,
+                    label=entry.get("label", self.project.get("label_column", "")),
+                )
+                joblib.dump(package, path)
             except Exception as error:
                 self.show_error("Export Error", error)
 
@@ -3608,46 +4096,31 @@ class AnalyticsWindow(QMainWindow):
             return
 
         try:
-            imported = joblib.load(path)
+            imported_payload = joblib.load(path)
         except Exception as error:
             self.show_error("Import Error", error)
             return
 
-        sidecar_metrics = {}
-        sidecar_parameters = {}
-        sidecar_features = []
-        sidecar_evaluation = {}
-        sidecar_common = {}
-        sidecar_required = {}
-        sidecar_advanced = {}
-        sidecar_path = Path(path).with_suffix(".json")
-        if sidecar_path.exists():
-            try:
-                with open(sidecar_path, "r", encoding="utf-8") as handle:
-                    sidecar = json.load(handle)
-                sidecar_metrics = sidecar.get("metrics", {}) or {}
-                sidecar_parameters = sidecar.get("parameters", {}) or {}
-                sidecar_features = sidecar.get("feature_columns", []) or []
-                sidecar_common = sidecar.get("common_parameters", {}) or {}
-                sidecar_required = sidecar.get("required_parameters", {}) or {}
-                sidecar_advanced = sidecar.get("advanced_parameters", {}) or {}
-                sidecar_evaluation = {
-                    "confusion_matrix": sidecar.get("confusion_matrix"),
-                    "confusion_labels": sidecar.get("confusion_labels"),
-                    "cluster_summary": sidecar.get("cluster_summary"),
-                    "ssl_progress": sidecar.get("ssl_progress"),
-                }
-            except Exception:
-                sidecar_metrics = {}
-                sidecar_parameters = {}
-                sidecar_features = []
-                sidecar_evaluation = {}
-                sidecar_common = {}
-                sidecar_required = {}
-                sidecar_advanced = {}
+        # New exports are self-contained PKL packages
+        imported, package_metadata, _ = unpack_model_package(imported_payload)
+        if imported is None:
+            QMessageBox.warning(self, "Import Error", "The PKL did not contain a model estimator.")
+            return
+
+        saved_metrics = package_metadata.get("metrics", {}) or {}
+        saved_parameters = package_metadata.get("parameters", {}) or {}
+        saved_features = package_metadata.get("feature_columns", []) or []
+        saved_evaluation = package_metadata.get("evaluation", {}) or {}
+        saved_evaluation["metrics"] = saved_evaluation.get("metrics") or saved_metrics
+        saved_common = package_metadata.get("common_parameters", {}) or {}
+        saved_required = package_metadata.get("required_parameters", {}) or {}
+        saved_advanced = package_metadata.get("advanced_parameters", {}) or {}
+
 
         category, algorithm = self._infer_external_model_category_algorithm(imported)
-        base_name = Path(path).stem
+        category = str(package_metadata.get("category") or category or "")
+        algorithm = str(package_metadata.get("algorithm") or algorithm or "")
+        base_name = str(package_metadata.get("display_name") or Path(path).stem)
         existing_names = [item.get("name", "") for item in self.project.get("added_models", [])]
         name = ModelController.unique_name(base_name, existing_names)
 
@@ -3657,7 +4130,7 @@ class AnalyticsWindow(QMainWindow):
             name=name,
             category=fallback_category,
             algorithm=fallback_algorithm,
-            label=self.project.get("label_column", ""),
+            label=package_metadata.get("label") or self.project.get("label_column", ""),
             common_parameters=ModelController.default_common_parameters(),
             required_parameters=ModelController.default_required_parameters(fallback_category, fallback_algorithm),
             advanced_parameters=ModelController.default_advanced_parameters(fallback_category, fallback_algorithm),
@@ -3667,17 +4140,18 @@ class AnalyticsWindow(QMainWindow):
         feature_columns = []
         if hasattr(imported, "feature_names_in_"):
             feature_columns = [str(col) for col in list(imported.feature_names_in_)]
-        if sidecar_features:
-            feature_columns = [str(col) for col in sidecar_features]
+        if saved_features:
+            feature_columns = [str(col) for col in saved_features]
         entry["feature_columns"] = feature_columns
-        entry["metrics"] = sidecar_metrics
-        entry["evaluation"] = sidecar_evaluation
-        if sidecar_common:
-            entry["common_parameters"] = sidecar_common
-        if sidecar_required:
-            entry["required_parameters"] = sidecar_required
-        if sidecar_advanced:
-            entry["advanced_parameters"] = sidecar_advanced
+        entry["metrics"] = saved_metrics
+        saved_evaluation["metrics"] = saved_evaluation.get("metrics") or saved_metrics
+        entry["evaluation"] = saved_evaluation
+        if saved_common:
+            entry["common_parameters"] = saved_common
+        if saved_required:
+            entry["required_parameters"] = saved_required
+        if saved_advanced:
+            entry["advanced_parameters"] = saved_advanced
         editable = bool(category and algorithm and self.project.get("label_column"))
         if editable and feature_columns and not self.working_df.empty:
             editable = all(column in self.working_df.columns for column in feature_columns)
@@ -3689,10 +4163,10 @@ class AnalyticsWindow(QMainWindow):
             "category": fallback_category,
             "algorithm": algorithm or "external",
             "model": imported,
-            "parameters": sidecar_parameters,
-            "metrics": sidecar_metrics,
+            "parameters": saved_parameters,
+            "metrics": saved_metrics,
             "feature_columns": feature_columns,
-            "evaluation": sidecar_evaluation,
+            "evaluation": saved_evaluation,
         })
 
         self._set_dirty(True)

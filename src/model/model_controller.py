@@ -76,12 +76,28 @@ MODEL_CATALOG: Dict[str, Dict[str, Dict[str, Any]]] = {
         "self_training": {
             "label": "Self-Training",
             "required": {
-                "threshold": {"type": "float", "default": 0.9, "min": 0.05, "max": 0.99, "step": 0.05},
+                # The base model is selected from a dropdown in the model builder
+                "base_model_name": {
+                    "type": "base_model",
+                    "default": "logistic_regression",
+                    "choices": [
+                        "logistic_regression",
+                        "random_forest",
+                        "decision_tree",
+                        "knn",
+                        "svm",
+                    ],
+                },
                 "max_iter": {"type": "int", "default": 10, "min": 1, "max": 100, "step": 1},
-                "base_model_name": {"type": "text", "default": ""},
             },
+            # Criterion-specific controls live in the Advanced Parameters dialog
             "advanced": {
-                "criterion": {"type": "choice", "default": "threshold", "choices": ["threshold", "k_best"]},
+                "criterion": {
+                    "type": "choice",
+                    "default": "threshold",
+                    "choices": ["threshold", "k_best"],
+                },
+                "threshold": {"type": "float", "default": 0.9, "min": 0.05, "max": 0.99, "step": 0.05},
                 "k_best": {"type": "int", "default": 10, "min": 1, "max": 1000, "step": 1},
             },
         },

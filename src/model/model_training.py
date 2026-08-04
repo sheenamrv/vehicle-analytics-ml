@@ -92,29 +92,74 @@ def evaluate_classifier_predictions(y_true, y_pred):
 def evaluate_cluster_labels(X, cluster_labels):
     return clustering_metrics(X, cluster_labels)
 
-# Evaluate selected saved models on a df and return results
+# Evaluate selected saved models on a df and return results safely skips clustering artifacts
 def evaluate_saved_models(models, df, label_col, fill_method="median", fill_value=None):
-    
-    X, y = prepare_training_data(
-        df=df,
-        label_col=label_col,
-        fill_method=fill_method,
-        fill_value=fill_value,
-    )
-
     results = []
-    
     for model_info in models:
-        X_test = align_features(X, model_info["feature_columns"], fill_value=0)
-        predictions = predict_model(model_info["model"], X_test)
-        evaluation = evaluate_classifier_predictions(y, predictions)
+        category = model_info.get("category", "supervised")
+
+        # Clustering artifacts retain the metrics generated at training time
+        # Their cluster IDs must not be compared with class labels
+        if category == "unsupervised":
+            results.append({
+                "name": model_info.get("display_name", "Unnamed model"),
+                "category": category,
+                "metrics": model_info.get("metrics", {}),
+                "confusion_matrix": None,
+                "predictions": None,
+                "note": "Clustering models use clustering metrics rather than classifier evaluation.",
+            })
+            continue
+
+        if label_col not in df.columns:
+            raise ValueError(f"Label column not found: {label_col}")
+
+        evaluation_df = df
+        if category == "semi_supervised":
+            # SSL models can be tested on datasets that still contain unlabeled rows, only rows with known labels are valid for evaluation.
+            evaluation_df = df[df[label_col].notna()].copy()
+            if evaluation_df.empty:
+                raise ValueError("No labeled rows are available for SSL evaluation.")
+        elif df[label_col].isna().any():
+            raise ValueError(
+                "Saved supervised-model evaluation requires known labels for every evaluated row."
+            )
+
+        features = model_info.get("feature_columns") or [
+            column for column in evaluation_df.columns if column != label_col
+        ]
+        missing = [column for column in features if column not in evaluation_df.columns]
+        if missing:
+            raise ValueError(
+                f"Feature columns not found for {model_info.get('display_name')}: {missing}"
+            )
+
+        model = model_info["model"]
+        # SSL bundles own their fitted imputer/scaler; ordinary models use shared preparation.
+        if category == "semi_supervised" or hasattr(model, "features"):
+            X_test = evaluation_df[features].copy()
+        else:
+            X, _ = prepare_training_data(
+                df=evaluation_df,
+                label_col=label_col,
+                features=features,
+                fill_method=fill_method,
+                fill_value=fill_value,
+            )
+            X_test = align_features(X, features, fill_value=0)
+
+        predictions = predict_model(model, X_test)
+        evaluation = evaluate_classifier_predictions(
+            evaluation_df[label_col], predictions
+        )
         results.append({
-            "name": model_info["display_name"],
+            "name": model_info.get("display_name", "Unnamed model"),
+            "category": category,
             "metrics": evaluation["metrics"],
             "confusion_matrix": evaluation["confusion_matrix"],
             "predictions": evaluation["predictions"],
+            "note": None,
         })
-
     return results
 
 def train_queue():
@@ -204,4 +249,3 @@ def display_test_results(results):
         for r in results:
             print(f"\n{r['name']}")
             print(r["predictions"][:20])
-

@@ -319,6 +319,7 @@ class AdvancedParametersDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Advanced Parameters")
         self.controls = {}
+        self.labels = {}
         self.values = dict(values or {})
 
         layout = QVBoxLayout(self)
@@ -332,7 +333,15 @@ class AdvancedParametersDialog(QDialog):
             value = self.values.get(key, spec.get("default"))
             self._set_control_value(control, value)
             self.controls[key] = control
-            form.addRow(key.replace("_", " ").title(), control)
+            label = QLabel(key.replace("_", " ").title())
+            self.labels[key] = label
+            form.addRow(label, control)
+
+        # SSL uses specific advanced settings
+        criterion_control = self.controls.get("criterion")
+        if isinstance(criterion_control, QComboBox):
+            criterion_control.currentTextChanged.connect(self._update_ssl_visibility)
+            self._update_ssl_visibility()
 
         buttons = QHBoxLayout()
         buttons.addStretch()
@@ -343,6 +352,22 @@ class AdvancedParametersDialog(QDialog):
         buttons.addWidget(cancel_btn)
         buttons.addWidget(ok_btn)
         layout.addLayout(buttons)
+
+    def _update_ssl_visibility(self):
+        criterion_control = self.controls.get("criterion")
+        if not isinstance(criterion_control, QComboBox):
+            return
+        criterion = criterion_control.currentText()
+        for key, visible in {
+            "threshold": criterion == "threshold",
+            "k_best": criterion == "k_best",
+        }.items():
+            control = self.controls.get(key)
+            label = self.labels.get(key)
+            if control is not None:
+                control.setVisible(visible)
+            if label is not None:
+                label.setVisible(visible)
 
     def _create_control(self, spec):
         kind = spec.get("type")
@@ -378,6 +403,8 @@ class AdvancedParametersDialog(QDialog):
     def collected_values(self):
         output = {}
         for key, control in self.controls.items():
+            if control.isHidden():
+                continue
             if isinstance(control, (QSpinBox, QDoubleSpinBox)):
                 output[key] = control.value()
             elif isinstance(control, QComboBox):
@@ -399,6 +426,7 @@ class UnifiedModelSidebar(QWidget):
         self.required_controls = {}
         self.advanced_specs = {}
         self.advanced_values = {}
+        self._trained_supervised_names = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(26, 28, 26, 22)
@@ -487,7 +515,7 @@ class UnifiedModelSidebar(QWidget):
             control.setDecimals(spec.get("decimals", 4))
             control.setValue(float(spec.get("default", 0.0)))
             return control
-        if control_type == "choice":
+        if control_type in {"choice", "base_model"}:
             control = taller_dropdown(QComboBox())
             choices = [str(item) for item in spec.get("choices", [])]
             control.addItems(choices)
@@ -507,7 +535,86 @@ class UnifiedModelSidebar(QWidget):
         while form.rowCount() > 0:
             form.removeRow(0)
 
+    #Show or hide a complete form row without removing its stored value
+    def _set_form_row_visible(self, form, control, visible):
+        label = form.labelForField(control)
+        if label is not None:
+            label.setVisible(visible)
+        control.setVisible(visible)
+
+    def _update_common_parameter_visibility(self, category):
+        visible_keys = {
+            "supervised": {"test_size", "verbose", "random_state", "stratify"},
+            "semi_supervised": {"test_size", "verbose", "random_state", "stratify"},
+            "unsupervised": {"verbose", "random_state"},
+        }.get(category, set(self.common_controls))
+
+        for key, control in self.common_controls.items():
+            self._set_form_row_visible(self.common_form, control, key in visible_keys)
+
+    #Populate the SSL base-model dropdown with built-ins and trained models
+    def _refresh_base_model_control(self):
+        control = self.required_controls.get("base_model_name")
+        if not isinstance(control, QComboBox):
+            return
+
+        current = control.currentText()
+        built_in = [
+            "logistic_regression",
+            "random_forest",
+            "decision_tree",
+            "knn",
+            "svm",
+        ]
+        choices = []
+        for name in built_in + list(self._trained_supervised_names):
+            text = str(name).strip()
+            if text and text not in choices:
+                choices.append(text)
+
+        control.blockSignals(True)
+        control.clear()
+        control.addItems(choices)
+        if current in choices:
+            control.setCurrentText(current)
+        elif choices:
+            control.setCurrentIndex(0)
+        control.blockSignals(False)
+
+    def _update_ssl_parameter_visibility(self, *_):
+        if self.category_combo.currentText() != "semi_supervised":
+            return
+        criterion_control = self.required_controls.get("criterion")
+        if not isinstance(criterion_control, QComboBox):
+            return
+
+        criterion = criterion_control.currentText()
+        threshold_control = self.required_controls.get("threshold")
+        k_best_control = self.required_controls.get("k_best")
+        if threshold_control is not None:
+            self._set_form_row_visible(
+                self.required_form,
+                threshold_control,
+                criterion == "threshold",
+            )
+        if k_best_control is not None:
+            self._set_form_row_visible(
+                self.required_form,
+                k_best_control,
+                criterion == "k_best",
+            )
+
+        #Receive trained supervised display names from the current project
+    def set_trained_supervised_models(self, names):
+        self._trained_supervised_names = [str(name) for name in names if str(name).strip()]
+        self._refresh_base_model_control()
+
+    def set_base_model_options(self, names):
+        """Backward-compatible alias for updating trained SSL base-model choices."""
+        self.set_trained_supervised_models(names)
+
     def _on_category_changed(self, category):
+        self._update_common_parameter_visibility(category)
         algorithms = ModelController.algorithms_for_category(category)
         self.algorithm_combo.blockSignals(True)
         self.algorithm_combo.clear()
@@ -530,7 +637,17 @@ class UnifiedModelSidebar(QWidget):
         self.advanced_button.setEnabled(bool(self.advanced_specs))
 
         for key, control in self.required_controls.items():
-            self.required_form.addRow(key.replace("_", " ").title(), control)
+            label = "Base Model" if key == "base_model_name" else key.replace("_", " ").title()
+            self.required_form.addRow(label, control)
+
+        if category == "semi_supervised":
+            self._refresh_base_model_control()
+            criterion_control = self.required_controls.get("criterion")
+            if isinstance(criterion_control, QComboBox):
+                criterion_control.currentTextChanged.connect(
+                    self._update_ssl_parameter_visibility
+                )
+            self._update_ssl_parameter_visibility()
 
         base_name = definition.get("label", algorithm.replace("_", " ").title())
         if not self.name_input.text().strip() or self._editing_original_name is None:
@@ -547,6 +664,10 @@ class UnifiedModelSidebar(QWidget):
     def _collect_values(self, controls):
         values = {}
         for key, control in controls.items():
+            # Hidden controls represent parameters that do not apply to the
+            # selected category or SSL criterion.
+            if control.isHidden():
+                continue
             if isinstance(control, (QSpinBox, QDoubleSpinBox)):
                 values[key] = control.value()
             elif isinstance(control, QComboBox):
@@ -629,6 +750,8 @@ class UnifiedModelSidebar(QWidget):
         }
         self.advanced_values.update(entry.get("advanced_parameters", {}))
         self.advanced_button.setEnabled(bool(self.advanced_specs))
+        self._refresh_base_model_control()
+        self._update_ssl_parameter_visibility()
 
 
 class UnifiedModelPage(QWidget):
