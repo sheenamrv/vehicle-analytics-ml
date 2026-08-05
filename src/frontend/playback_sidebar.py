@@ -1,6 +1,7 @@
 import pandas as pd
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QComboBox,
     QFrame,
     QLabel,
@@ -86,6 +87,7 @@ class PlaybackSidebar(QWidget):
 
         self.udp_host = QLineEdit("0.0.0.0")
         self.udp_port = QSpinBox()
+        self.udp_port.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
         self.udp_port.setRange(1, 65535)
         self.udp_port.setValue(5005)
         self.stream_button = primary_button("Start UDP Stream")
@@ -135,12 +137,14 @@ class PlaybackSidebar(QWidget):
         layout.addWidget(self.signal_picker)
 
         self.window_size = QSpinBox()
+        self.window_size.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
         self.window_size.setRange(10, 10000)
         self.window_size.setValue(100)
         layout.addWidget(QLabel("Plot window size"))
         layout.addWidget(self.window_size)
 
         self.playback_delay = QSpinBox()
+        self.playback_delay.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
         self.playback_delay.setRange(10, 10000)
         self.playback_delay.setValue(300)
         self.playback_delay.setSuffix(" ms")

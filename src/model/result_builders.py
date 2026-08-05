@@ -3,6 +3,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.patches import Patch
 from scipy.cluster.hierarchy import dendrogram, linkage
 from sklearn.base import clone
 from sklearn.calibration import calibration_curve
@@ -92,6 +93,65 @@ def _numeric_metrics(metrics):
     return output
 
 
+def _pick_cloneable_estimator(model):
+    """Pick the best available estimator for clone-based diagnostic charts."""
+    candidates = [
+        model,
+        getattr(model, "estimator", None),
+        getattr(model, "estimator_", None),
+    ]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            clone(candidate)
+            return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _ordered_cluster_keys(values):
+    keys = [str(value) for value in values if pd.notna(value)]
+    unique = list(dict.fromkeys(keys))
+
+    def sort_key(cluster_key):
+        if cluster_key == "-1":
+            return (0, -1)
+        try:
+            return (1, int(float(cluster_key)))
+        except (TypeError, ValueError):
+            return (2, cluster_key)
+
+    return sorted(unique, key=sort_key)
+
+
+def _cluster_color_lookup(cluster_keys):
+    palette = [
+        "#2563eb",
+        "#16a34a",
+        "#f59e0b",
+        "#dc2626",
+        "#7c3aed",
+        "#0891b2",
+        "#ea580c",
+        "#1d4ed8",
+    ]
+    lookup = {}
+    color_index = 0
+    for key in cluster_keys:
+        if key == "-1":
+            lookup[key] = "#6b7280"
+        else:
+            lookup[key] = palette[color_index % len(palette)]
+            color_index += 1
+    return lookup
+
+
+def _cluster_display_name(cluster_key):
+    return "Noise" if str(cluster_key) == "-1" else f"Cluster {cluster_key}"
+
+
 def _build_metrics_chart(metrics, path):
     if not metrics:
         return False
@@ -126,7 +186,7 @@ def _build_confusion_chart(matrix, labels, path):
     plt.imshow(frame.values, cmap="Greens")
     plt.title("Confusion Matrix")
     plt.colorbar(fraction=0.046, pad=0.04)
-    plt.xticks(range(frame.shape[1]), frame.columns, rotation=35, ha="right")
+    plt.xticks(range(frame.shape[1]), frame.columns, rotation=45, ha="right")
     plt.yticks(range(frame.shape[0]), frame.index)
     plt.xlabel("Predicted")
     plt.ylabel("Actual")
@@ -229,13 +289,33 @@ def _build_cluster_summary_chart(cluster_summary, path):
     if not {"cluster", "count"}.issubset(frame.columns):
         return False
 
-    frame = frame.sort_values("cluster")
+    frame = frame.copy()
+    frame["cluster_key"] = frame["cluster"].astype(str)
+    ordered_keys = _ordered_cluster_keys(frame["cluster_key"].tolist())
+    if not ordered_keys:
+        return False
+    color_lookup = _cluster_color_lookup(ordered_keys)
+    counts = {
+        key: float(
+            pd.to_numeric(
+                frame.loc[frame["cluster_key"] == key, "count"], errors="coerce"
+            ).fillna(0).sum()
+        )
+        for key in ordered_keys
+    }
+    labels = [_cluster_display_name(key) for key in ordered_keys]
+    values = [counts[key] for key in ordered_keys]
+    colors = [color_lookup[key] for key in ordered_keys]
+
     plt.figure(figsize=(7.2, 4.4))
-    plt.bar(frame["cluster"].astype(str), frame["count"], color="#1f7a8c")
+    plt.bar(labels, values, color=colors)
     plt.title("Cluster Membership")
     plt.xlabel("Cluster")
     plt.ylabel("Count")
+    plt.xticks(rotation=45, ha="right")
     plt.grid(axis="y", alpha=0.25)
+    handles = [Patch(facecolor=color_lookup[key], label=_cluster_display_name(key)) for key in ordered_keys]
+    plt.legend(handles=handles, loc="best", frameon=False)
     plt.tight_layout()
     plt.savefig(path, dpi=160)
     plt.close()
@@ -258,8 +338,8 @@ def _build_cluster_plot(cluster_plot_data, component_count, path):
     if frame.empty:
         return False
 
-    clusters = list(pd.unique(frame["cluster"].astype(str)))
-    cmap = plt.get_cmap("tab10")
+    clusters = _ordered_cluster_keys(frame["cluster"].astype(str).tolist())
+    color_lookup = _cluster_color_lookup(clusters)
     plt.figure(figsize=(7.6, 5.0))
 
     if int(component_count or 2) >= 2 and "PC2" in frame.columns:
@@ -269,37 +349,37 @@ def _build_cluster_plot(cluster_plot_data, component_count, path):
             return False
         for index, cluster in enumerate(clusters):
             rows = frame[frame["cluster"].astype(str) == cluster]
-            label = "Noise" if cluster == "-1" else f"Cluster {cluster}"
+            label = _cluster_display_name(cluster)
             plt.scatter(
                 rows["PC1"],
                 rows["PC2"],
                 label=label,
                 alpha=0.85,
-                color=cmap(index % 10),
+                color=color_lookup[cluster],
             )
         plt.xlabel("Principal component 1")
         plt.ylabel("Principal component 2")
-        plt.title("Cluster Separation (PCA)")
+        plt.title("Cluster Separation (PCA, 2 Components)")
     else:
         # When only one component is possible, show each cluster along PC1
         for index, cluster in enumerate(clusters):
             rows = frame[frame["cluster"].astype(str) == cluster]
             y = np.full(len(rows), index, dtype=float)
-            label = "Noise" if cluster == "-1" else f"Cluster {cluster}"
+            label = _cluster_display_name(cluster)
             plt.scatter(
                 rows["PC1"],
                 y,
                 label=label,
                 alpha=0.85,
-                color=cmap(index % 10),
+                color=color_lookup[cluster],
             )
         plt.yticks(range(len(clusters)), [
-            "Noise" if value == "-1" else f"Cluster {value}"
+            _cluster_display_name(value)
             for value in clusters
         ])
         plt.xlabel("Principal component 1")
         plt.ylabel("Cluster")
-        plt.title("One-Dimensional Cluster Distribution")
+        plt.title("One-Dimensional Cluster Distribution (PCA, 1 Component)")
 
     plt.grid(alpha=0.22)
     plt.legend(loc="best")
@@ -414,7 +494,7 @@ def _build_ssl_iteration_progress_chart(progress_rows, path):
     plt.xlabel("Iteration")
     plt.ylabel("Percentage of originally unlabeled rows")
     plt.ylim(0, 100)
-    plt.xticks(rotation=20, ha="right")
+    plt.xticks(rotation=45, ha="right")
     plt.grid(axis="y", alpha=0.25)
     plt.legend(frameon=False)
     plt.tight_layout()
@@ -477,6 +557,91 @@ def _build_ssl_iteration_table(progress_rows, path):
     fig.tight_layout()
     fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
+    return True
+
+
+def _build_ssl_label_source_chart(ssl_export_data, path):
+    if not ssl_export_data:
+        return False
+    frame = pd.DataFrame(ssl_export_data)
+    source_columns = [
+        column for column in frame.columns if str(column).endswith("_source")
+    ]
+    if not source_columns:
+        return False
+
+    source_column = source_columns[0]
+    counts = frame[source_column].astype(str).value_counts()
+    if counts.empty:
+        return False
+
+    labels = [
+        "Original" if key == "original" else
+        "Pseudo-labeled" if key == "pseudo_labeled" else
+        "Remaining unlabeled" if key == "remaining_unlabeled" else str(key)
+        for key in counts.index
+    ]
+    values = counts.values.astype(float)
+    percentages = values / max(1.0, values.sum()) * 100.0
+
+    plt.figure(figsize=(7.4, 4.8))
+    bars = plt.bar(labels, percentages, color=["#2563eb", "#16a34a", "#dc2626"][:len(labels)])
+    plt.ylim(0, 100)
+    plt.ylabel("Percentage")
+    plt.title("SSL Label Source Distribution")
+    plt.grid(axis="y", alpha=0.25)
+    for bar, pct in zip(bars, percentages):
+        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{pct:.1f}%", ha="center", va="bottom", fontsize=9)
+    plt.tight_layout()
+    plt.savefig(path, dpi=160)
+    plt.close()
+    return True
+
+
+def _build_cluster_percentage_chart(cluster_summary, path):
+    if not cluster_summary:
+        return False
+    frame = pd.DataFrame(cluster_summary)
+    if frame.empty or not {"cluster", "count"}.issubset(frame.columns):
+        return False
+
+    frame = frame.copy()
+    frame["count"] = pd.to_numeric(frame["count"], errors="coerce")
+    frame = frame.dropna(subset=["count"])
+    if frame.empty:
+        return False
+
+    total = float(frame["count"].sum())
+    if total <= 0:
+        return False
+    frame["cluster_key"] = frame["cluster"].astype(str)
+    frame["percentage"] = frame["count"] / total * 100.0
+    ordered_keys = _ordered_cluster_keys(frame["cluster_key"].tolist())
+    if not ordered_keys:
+        return False
+    color_lookup = _cluster_color_lookup(ordered_keys)
+    percentages = {
+        key: float(frame.loc[frame["cluster_key"] == key, "percentage"].sum())
+        for key in ordered_keys
+    }
+    labels = [_cluster_display_name(key) for key in ordered_keys]
+    values = [percentages[key] for key in ordered_keys]
+    colors = [color_lookup[key] for key in ordered_keys]
+
+    plt.figure(figsize=(7.4, 4.8))
+    bars = plt.bar(labels, values, color=colors)
+    plt.ylim(0, 100)
+    plt.ylabel("Percentage of samples")
+    plt.title("Cluster Size Distribution")
+    plt.xticks(rotation=45, ha="right")
+    plt.grid(axis="y", alpha=0.25)
+    for bar, value in zip(bars, values):
+        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{value:.1f}%", ha="center", va="bottom", fontsize=9)
+    handles = [Patch(facecolor=color_lookup[key], label=_cluster_display_name(key)) for key in ordered_keys]
+    plt.legend(handles=handles, loc="best", frameon=False)
+    plt.tight_layout()
+    plt.savefig(path, dpi=160)
+    plt.close()
     return True
 
 
@@ -584,8 +749,12 @@ def _build_learning_curve_chart(model, X, y, path):
     if X.ndim != 2 or X.shape[0] < 20:
         return False
 
+    estimator = _pick_cloneable_estimator(model)
+    if estimator is None:
+        return False
+
     train_sizes, train_scores, valid_scores = learning_curve(
-        clone(model),
+        clone(estimator),
         X,
         y,
         cv=3,
@@ -717,16 +886,26 @@ def _build_cluster_scatter_chart(X, cluster_labels, path):
         points = PCA(n_components=2).fit_transform(X)
     elif X.shape[1] == 2:
         points = X
+    elif X.shape[1] == 1:
+        points = np.column_stack([X[:, 0], np.zeros(X.shape[0], dtype=float)])
     else:
         return False
 
     plt.figure(figsize=(7.0, 5.4))
-    scatter = plt.scatter(points[:, 0], points[:, 1], c=labels, cmap="viridis", s=38, alpha=0.85)
-    plt.colorbar(scatter, fraction=0.046, pad=0.04)
+    cluster_keys = _ordered_cluster_keys(labels.astype(str).tolist())
+    color_lookup = _cluster_color_lookup(cluster_keys)
+    point_colors = [color_lookup.get(str(cluster), "#334155") for cluster in labels]
+
+    plt.scatter(points[:, 0], points[:, 1], c=point_colors, s=38, alpha=0.85)
     plt.xlabel("Component 1")
     plt.ylabel("Component 2")
-    plt.title("Cluster Scatter Plot")
+    if X.shape[1] == 1:
+        plt.title("Cluster Scatter Plot (single feature projected to 2D)")
+    else:
+        plt.title("Cluster Scatter Plot")
     plt.grid(alpha=0.25)
+    handles = [Patch(facecolor=color_lookup[key], label=_cluster_display_name(key)) for key in cluster_keys]
+    plt.legend(handles=handles, loc="best", frameon=False)
     plt.tight_layout()
     plt.savefig(path, dpi=160)
     plt.close()
@@ -952,7 +1131,7 @@ def render_confusion_matrix_image(matrix, labels, path, title="Confusion Matrix"
     plt.imshow(frame.values, cmap="Greens")
     plt.title(title)
     plt.colorbar(fraction=0.046, pad=0.04)
-    plt.xticks(range(frame.shape[1]), frame.columns, rotation=30, ha="right")
+    plt.xticks(range(frame.shape[1]), frame.columns, rotation=45, ha="right")
     plt.yticks(range(frame.shape[0]), frame.index)
     plt.xlabel("Predicted")
     plt.ylabel("Actual")
@@ -966,60 +1145,279 @@ def render_confusion_matrix_image(matrix, labels, path, title="Confusion Matrix"
 
 
 def render_comparison_metrics_image(records, path):
-    """Render a single comparison metrics image with a centered legend."""
-    rows = []
-    for record in records or []:
-        metrics = _numeric_metrics(record.get("metrics", {}))
-        rows.append({
-            "name": record.get("name", ""),
-            "accuracy": metrics.get("accuracy"),
-            "precision": metrics.get("precision"),
-            "recall": metrics.get("recall"),
-            "f1": metrics.get("f1"),
-        })
-
-    frame = pd.DataFrame(rows)
-    required = {"name", "accuracy", "precision", "recall", "f1"}
-    if frame.empty or not required.issubset(frame.columns):
+    """Render per-model metric bars grouped by category order."""
+    if not records:
         return False
 
-    plot_df = frame[["name", "accuracy", "precision", "recall", "f1"]].melt(
-        id_vars="name",
-        value_vars=["accuracy", "precision", "recall", "f1"],
-        var_name="metric",
-        value_name="score",
-    ).dropna()
-    if plot_df.empty:
-        return False
-
-    plt.figure(figsize=(max(8.0, 1.2 * len(frame)), 5.2))
-    unique_names = plot_df["name"].unique().tolist()
-    metrics = ["accuracy", "precision", "recall", "f1"]
-    x = np.arange(len(unique_names))
-    width = 0.18
-    palette = {
-        "accuracy": "#1f7a8c",
-        "precision": "#2b9348",
-        "recall": "#f77f00",
-        "f1": "#8338ec",
+    category_labels = {
+        "supervised": "Supervised",
+        "semi_supervised": "Semi-Supervised",
+        "unsupervised": "Unsupervised",
     }
-    for idx, metric in enumerate(metrics):
-        values = []
-        for name in unique_names:
-            entry = plot_df[(plot_df["name"] == name) & (plot_df["metric"] == metric)]
-            values.append(float(entry.iloc[0]["score"]) if not entry.empty else np.nan)
-        offset = (idx - 1.5) * width
-        plt.bar(x + offset, values, width=width, label=metric.title(), color=palette[metric])
+    preferred = {
+        "supervised": ["accuracy", "precision", "recall", "f1"],
+        "semi_supervised": ["accuracy", "precision", "recall", "f1"],
+        "unsupervised": [
+            "silhouette_score",
+            "davies_bouldin_score",
+            "calinski_harabasz_score",
+            "cluster_count",
+            "noise_count",
+        ],
+    }
+    exclude_from_semi = {
+        "silhouette_score",
+        "davies_bouldin_score",
+        "calinski_harabasz_score",
+        "cluster_count",
+        "noise_count",
+    }
 
-    plt.xticks(x, unique_names, rotation=20, ha="right")
-    plt.ylim(0, 1.05)
-    plt.ylabel("Score")
-    plt.title("Comparison Metrics")
-    plt.grid(axis="y", alpha=0.25)
-    plt.legend(loc="upper center", bbox_to_anchor=(0.5, 1.18), ncol=4, frameon=False)
-    plt.tight_layout()
-    plt.savefig(path, dpi=170)
-    plt.close()
+    plotted = []
+    for category in ["supervised", "semi_supervised", "unsupervised"]:
+        category_records = [
+            record for record in records
+            if str(record.get("category", "")).strip() == category
+        ]
+        category_records.sort(key=lambda record: str(record.get("name", "")))
+        for record in category_records:
+            metrics = _numeric_metrics(record.get("metrics", {}))
+            ordered_keys = [key for key in preferred.get(category, []) if key in metrics]
+
+            dynamic_keys = []
+            for key in metrics.keys():
+                if key in ordered_keys:
+                    continue
+                if category == "semi_supervised" and key in exclude_from_semi:
+                    continue
+                dynamic_keys.append(key)
+            dynamic_keys.sort()
+
+            metric_keys = ordered_keys + dynamic_keys
+            if not metric_keys:
+                continue
+
+            values = np.array([
+                float(pd.to_numeric(metrics.get(key), errors="coerce"))
+                for key in metric_keys
+            ], dtype=float)
+            finite_mask = np.isfinite(values)
+            if not finite_mask.any():
+                continue
+
+            plotted.append({
+                "category": category,
+                "category_label": category_labels.get(category, category.title()),
+                "name": str(record.get("name", "model")),
+                "keys": metric_keys,
+                "values": values,
+            })
+
+    if not plotted:
+        return False
+
+    columns = 2 if len(plotted) > 1 else 1
+    rows_count = int(np.ceil(len(plotted) / columns))
+    fig, axes = plt.subplots(rows_count, columns, figsize=(10.0 * columns / 2, max(4.4, 3.6 * rows_count)))
+    axes = np.array(axes).reshape(-1)
+
+    category_colors = {
+        "supervised": "#2563eb",
+        "semi_supervised": "#16a34a",
+        "unsupervised": "#0f766e",
+    }
+    for axis, item in zip(axes, plotted):
+        keys = item["keys"]
+        values = item["values"]
+        bar_colors = [
+            "#2563eb",
+            "#16a34a",
+            "#f59e0b",
+            "#dc2626",
+            "#7c3aed",
+            "#0891b2",
+            "#ea580c",
+            "#334155",
+        ]
+        bars = axis.bar(
+            range(len(keys)),
+            np.nan_to_num(values, nan=0.0),
+            color=[bar_colors[index % len(bar_colors)] for index in range(len(keys))],
+        )
+        axis.set_xticks(range(len(keys)))
+        axis.set_xticklabels(
+            [key.replace("_", " ").title() for key in keys],
+            rotation=45,
+            ha="right",
+        )
+        axis.set_title(f"{item['category_label']} - {item['name']}")
+        axis.grid(axis="y", alpha=0.25)
+
+        finite_values = values[np.isfinite(values)]
+        if finite_values.size:
+            min_value = float(finite_values.min())
+            max_value = float(finite_values.max())
+            if all(
+                key in {"accuracy", "precision", "recall", "f1", "silhouette_score"}
+                for key in keys
+            ):
+                axis.set_ylim(min(-0.1, min_value - 0.05), max(1.0, max_value + 0.05))
+            else:
+                axis.set_ylim(min(0.0, min_value * 0.95), max_value * 1.12 if max_value else 1.0)
+
+        for bar, value in zip(bars, values):
+            label_text = "N/A" if not np.isfinite(value) else f"{value:.3f}"
+            axis.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                label_text,
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+        legend_handles = [
+            Patch(
+                facecolor=bar_colors[index % len(bar_colors)],
+                label=key.replace("_", " ").title(),
+            )
+            for index, key in enumerate(keys)
+        ]
+        axis.legend(
+            handles=legend_handles,
+            title="Metrics",
+            loc="upper right",
+            frameon=False,
+            fontsize=8,
+            title_fontsize=8,
+        )
+
+    for axis in axes[len(plotted):]:
+        axis.axis("off")
+
+    fig.suptitle("Comparison Metrics by Category and Model", fontsize=14)
+    fig.tight_layout(rect=[0, 0.02, 1, 0.98])
+    fig.savefig(path, dpi=170)
+    plt.close(fig)
+    return True
+
+
+def render_model_specific_comparison_image(records, path):
+    """Render model-specific visuals with one subplot per selected model."""
+    ssl_rows = []
+    cluster_rows = []
+    for record in records or []:
+        category = str(record.get("category", ""))
+        evaluation = record.get("evaluation", {}) or {}
+        name = str(record.get("name", ""))
+
+        if category == "semi_supervised":
+            progress = evaluation.get("ssl_progress", []) or []
+            values = {
+                str(item.get("status", "")): float(item.get("percentage", 0.0) or 0.0)
+                for item in progress
+            }
+            if values:
+                ssl_rows.append({
+                    "name": name,
+                    "pseudo_labeled": values.get("Pseudo-labeled", 0.0),
+                    "remaining_unlabeled": values.get("Remaining unlabeled", 0.0),
+                })
+
+        if category == "unsupervised":
+            metrics = _numeric_metrics(record.get("metrics", {}))
+            cluster_count = metrics.get("cluster_count")
+            noise_count = metrics.get("noise_count")
+            if cluster_count is not None or noise_count is not None:
+                cluster_rows.append({
+                    "name": name,
+                    "cluster_count": float(cluster_count or 0.0),
+                    "noise_count": float(noise_count or 0.0),
+                })
+
+    if ssl_rows and cluster_rows:
+        # Callers normally pass one category at a time. Keep this guard so
+        # mixed input cannot produce ambiguous output.
+        return False
+
+    if not ssl_rows and not cluster_rows:
+        return False
+
+    if ssl_rows:
+        panels = len(ssl_rows)
+        columns = 2 if panels > 1 else 1
+        rows = int(np.ceil(panels / columns))
+        fig, axes = plt.subplots(rows, columns, figsize=(8.8 * columns / 2, max(4.0, 3.4 * rows)))
+        axes = np.array(axes).reshape(-1)
+        for axis, row in zip(axes, ssl_rows):
+            labels = ["Pseudo-labeled %", "Remaining unlabeled %"]
+            values = [row["pseudo_labeled"], row["remaining_unlabeled"]]
+            bars = axis.bar(labels, values, color=["#16a34a", "#dc2626"])
+            axis.set_ylim(0, 100)
+            axis.set_ylabel("Percentage")
+            axis.set_title(f"Semi-Supervised - {row['name']}")
+            axis.grid(axis="y", alpha=0.25)
+            axis.legend(
+                handles=[
+                    Patch(facecolor="#16a34a", label="Pseudo-labeled %"),
+                    Patch(facecolor="#dc2626", label="Remaining unlabeled %"),
+                ],
+                frameon=False,
+                loc="upper right",
+            )
+            for bar, value in zip(bars, values):
+                axis.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height(),
+                    f"{float(value):.2f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+        for axis in axes[len(ssl_rows):]:
+            axis.axis("off")
+        fig.suptitle("Model-Specific Comparison", fontsize=14)
+        fig.tight_layout(rect=[0, 0.02, 1, 0.98])
+        fig.savefig(path, dpi=170)
+        plt.close(fig)
+        return True
+
+    panels = len(cluster_rows)
+    columns = 2 if panels > 1 else 1
+    rows = int(np.ceil(panels / columns))
+    fig, axes = plt.subplots(rows, columns, figsize=(8.8 * columns / 2, max(4.0, 3.4 * rows)))
+    axes = np.array(axes).reshape(-1)
+    for axis, row in zip(axes, cluster_rows):
+        labels = ["Clusters", "Noise points"]
+        values = [row["cluster_count"], row["noise_count"]]
+        bars = axis.bar(labels, values, color=["#0f766e", "#7f1d1d"])
+        axis.set_ylabel("Count")
+        axis.set_title(f"Unsupervised - {row['name']}")
+        axis.grid(axis="y", alpha=0.25)
+        axis.legend(
+            handles=[
+                Patch(facecolor="#0f766e", label="Clusters"),
+                Patch(facecolor="#7f1d1d", label="Noise points"),
+            ],
+            frameon=False,
+            loc="upper right",
+        )
+        for bar, value in zip(bars, values):
+            axis.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                f"{float(value):.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+    for axis in axes[len(cluster_rows):]:
+        axis.axis("off")
+
+    fig.suptitle("Model-Specific Comparison", fontsize=14)
+    fig.tight_layout(rect=[0, 0.02, 1, 0.98])
+    fig.savefig(path, dpi=170)
+    plt.close(fig)
     return True
 
 
@@ -1045,7 +1443,7 @@ def render_combined_confusion_matrices_image(records, path):
 
     columns = 2 if len(matrices) > 1 else 1
     rows = int(np.ceil(len(matrices) / columns))
-    fig, axes = plt.subplots(rows, columns, figsize=(6.5 * columns, 5.5 * rows))
+    fig, axes = plt.subplots(rows, columns, figsize=(7.2 * columns, 5.6 * rows))
     axes_array = np.array(axes).reshape(-1)
 
     for axis, (name, frame) in zip(axes_array, matrices):
@@ -1055,7 +1453,7 @@ def render_combined_confusion_matrices_image(records, path):
         axis.set_ylabel("Actual")
         axis.set_xticks(range(frame.shape[1]))
         axis.set_yticks(range(frame.shape[0]))
-        axis.set_xticklabels(frame.columns, rotation=30, ha="right")
+        axis.set_xticklabels(frame.columns, rotation=45, ha="right")
         axis.set_yticklabels(frame.index)
         for row in range(frame.shape[0]):
             for col in range(frame.shape[1]):
@@ -1091,6 +1489,7 @@ def generate_model_report_assets(model_record, output_root, include_pdf=True):
     cluster_plot_components = model_record.get("cluster_plot_components")
     ssl_progress = model_record.get("ssl_progress")
     ssl_iteration_progress = model_record.get("ssl_iteration_progress")
+    ssl_export_data = model_record.get("ssl_export_data")
     model_obj = model_record.get("model")
     feature_columns = model_record.get("feature_columns", [])
     category = str(model_record.get("category", ""))
@@ -1129,6 +1528,16 @@ def generate_model_report_assets(model_record, output_root, include_pdf=True):
                 ssl_iteration_progress, p
             ),
         ),
+        (
+            "ssl_label_source.png",
+            lambda p: _build_ssl_label_source_chart(
+                ssl_export_data, p
+            ),
+        ),
+        (
+            "cluster_size_distribution.png",
+            lambda p: _build_cluster_percentage_chart(cluster_summary, p),
+        ),
     ]
     for filename, builder in base_builders:
         candidate = report_dir / filename
@@ -1140,47 +1549,39 @@ def generate_model_report_assets(model_record, output_root, include_pdf=True):
         if created:
             image_paths.append(candidate)
 
-    if not correlated:
-        if not image_paths:
-            return report_dir, None, []
-        pdf_path = None
-        if include_pdf:
-            pdf_path = report_dir / f"{model_name}_report.pdf"
-            _write_pdf_from_images(image_paths, pdf_path, model_name)
-        return report_dir, pdf_path, image_paths
+    if correlated:
+        generic_builders = [
+            ("feature_importance.png", lambda p: _build_feature_importance_chart(model_obj, feature_columns, p)),
+            ("coefficient_magnitude.png", lambda p: _build_coefficients_chart(model_obj, feature_columns, p)),
+            ("loss.png", lambda p: _build_loss_chart(model_obj, p)),
+            ("roc_curve.png", lambda p: _build_roc_curve_chart(y_true, y_score, p)),
+            ("precision_recall_curve.png", lambda p: _build_pr_curve_chart(y_true, y_score, p)),
+            ("learning_curve.png", lambda p: _build_learning_curve_chart(model_obj, X, y, p)),
+            ("decision_boundary.png", lambda p: _build_decision_boundary_chart(model_obj, X, y, p)),
+        ]
 
-    generic_builders = [
-        ("feature_importance.png", lambda p: _build_feature_importance_chart(model_obj, feature_columns, p)),
-        ("coefficient_magnitude.png", lambda p: _build_coefficients_chart(model_obj, feature_columns, p)),
-        ("loss.png", lambda p: _build_loss_chart(model_obj, p)),
-        ("roc_curve.png", lambda p: _build_roc_curve_chart(y_true, y_score, p)),
-        ("precision_recall_curve.png", lambda p: _build_pr_curve_chart(y_true, y_score, p)),
-        ("learning_curve.png", lambda p: _build_learning_curve_chart(model_obj, X, y, p)),
-        ("decision_boundary.png", lambda p: _build_decision_boundary_chart(model_obj, X, y, p)),
-    ]
+        for filename, builder in generic_builders:
+            candidate = report_dir / filename
+            try:
+                created = builder(candidate)
+            except Exception as error:
+                print(f"Skipped report chart {filename}: {error}")
+                created = False
+            if created:
+                image_paths.append(candidate)
 
-    for filename, builder in generic_builders:
-        candidate = report_dir / filename
-        try:
-            created = builder(candidate)
-        except Exception as error:
-            print(f"Skipped report chart {filename}: {error}")
-            created = False
-        if created:
-            image_paths.append(candidate)
-
-    validation_param_map = {
-        "svm": ("C", [0.1, 0.5, 1.0, 5.0, 10.0]),
-        "knn": ("n_neighbors", [1, 3, 5, 7, 9, 11]),
-        "decision_tree": ("max_depth", [2, 4, 6, 8, 10]),
-        "random_forest": ("n_estimators", [20, 50, 100, 200]),
-        "logistic_regression": ("C", [0.1, 0.5, 1.0, 5.0, 10.0]),
-    }
-    if algorithm in validation_param_map:
-        param_name, param_values = validation_param_map[algorithm]
-        candidate = report_dir / "validation_curve.png"
-        if _build_validation_curve_chart(model_obj, X, y, candidate, param_name, param_values):
-            image_paths.append(candidate)
+        validation_param_map = {
+            "svm": ("C", [0.1, 0.5, 1.0, 5.0, 10.0]),
+            "knn": ("n_neighbors", [1, 3, 5, 7, 9, 11]),
+            "decision_tree": ("max_depth", [2, 4, 6, 8, 10]),
+            "random_forest": ("n_estimators", [20, 50, 100, 200]),
+            "logistic_regression": ("C", [0.1, 0.5, 1.0, 5.0, 10.0]),
+        }
+        if algorithm in validation_param_map:
+            param_name, param_values = validation_param_map[algorithm]
+            candidate = report_dir / "validation_curve.png"
+            if _build_validation_curve_chart(model_obj, X, y, candidate, param_name, param_values):
+                image_paths.append(candidate)
 
     algorithm_specific = {
         "knn": [
@@ -1206,8 +1607,11 @@ def generate_model_report_assets(model_record, output_root, include_pdf=True):
     }
     for filename, builder in algorithm_specific.get(algorithm, []):
         candidate = report_dir / filename
-        if builder(candidate):
-            image_paths.append(candidate)
+        try:
+            if builder(candidate):
+                image_paths.append(candidate)
+        except Exception as error:
+            print(f"Skipped report chart {filename}: {error}")
 
     if algorithm == "decision_tree" and hasattr(model_obj, "tree_"):
         tree_path = report_dir / "decision_tree_structure.png"

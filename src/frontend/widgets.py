@@ -1,6 +1,7 @@
 import html
 
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QButtonGroup,
     QCheckBox,
     QDoubleSpinBox,
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 
-SIDEBAR_WIDTH = 280
+SIDEBAR_WIDTH = 320
 DROPDOWN_MIN_HEIGHT = 32
 
 
@@ -149,11 +150,19 @@ class WheelLockedComboBox(QComboBox):
 
 
 class WheelLockedSpinBox(QSpinBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
+
     def wheelEvent(self, event):
         event.ignore()
 
 
 class WheelLockedDoubleSpinBox(QDoubleSpinBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
+
     def wheelEvent(self, event):
         event.ignore()
 
@@ -189,7 +198,7 @@ def tab_row(parent, labels, callback, compact=False):
     layout.addLayout(row)
     layout.addWidget(line)
     buttons[0].setChecked(True)
-    return {"layout": layout, "buttons": buttons, "group": group}
+    return {"layout": layout, "buttons": buttons, "group": group, "line": line}
 
 
 def sidebar_base():

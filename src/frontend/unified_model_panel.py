@@ -4,6 +4,7 @@ import pandas as pd
 from PySide6.QtCore import Qt, Signal, QEvent, QRect
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QDialog,
     QAbstractItemView,
     QCheckBox,
@@ -31,6 +32,9 @@ from src.frontend.widgets import (
     section_label,
     secondary_button,
     taller_dropdown,
+    WheelLockedComboBox,
+    WheelLockedDoubleSpinBox,
+    WheelLockedSpinBox,
 )
 from src.model.model_controller import COMMON_TRAINING_PARAMETERS, ModelController
 
@@ -372,12 +376,14 @@ class AdvancedParametersDialog(QDialog):
     def _create_control(self, spec):
         kind = spec.get("type")
         if kind == "int":
-            widget = QSpinBox()
+            widget = WheelLockedSpinBox()
+            widget.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
             widget.setRange(spec.get("min", -2147483648), spec.get("max", 2147483647))
             widget.setSingleStep(spec.get("step", 1))
             return widget
         if kind == "float":
-            widget = QDoubleSpinBox()
+            widget = WheelLockedDoubleSpinBox()
+            widget.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
             widget.setRange(spec.get("min", -1e12), spec.get("max", 1e12))
             widget.setSingleStep(spec.get("step", 0.1))
             widget.setDecimals(spec.get("decimals", 4))
@@ -422,11 +428,13 @@ class UnifiedModelSidebar(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setProperty("sidebar", True)
         self._editing_original_name = None
         self.required_controls = {}
         self.advanced_specs = {}
         self.advanced_values = {}
-        self._trained_supervised_names = []
+        self._supervised_base_catalog = []
+        self._base_model_label_map = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(26, 28, 26, 22)
@@ -464,6 +472,8 @@ class UnifiedModelSidebar(QWidget):
         layout.addWidget(section_label("COMMON PARAMETERS"))
         self.common_form = QFormLayout()
         self.common_form.setContentsMargins(0, 0, 0, 0)
+        self.common_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.common_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         self.common_controls = self._build_controls(COMMON_TRAINING_PARAMETERS)
         for key, control in self.common_controls.items():
             self.common_form.addRow(key.replace("_", " ").title(), control)
@@ -473,6 +483,8 @@ class UnifiedModelSidebar(QWidget):
         layout.addWidget(section_label("REQUIRED PARAMETERS"))
         self.required_form = QFormLayout()
         self.required_form.setContentsMargins(0, 0, 0, 0)
+        self.required_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.required_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
         layout.addLayout(self.required_form)
 
         self.show_advanced = QCheckBox("Use Advanced Parameters")
@@ -503,22 +515,34 @@ class UnifiedModelSidebar(QWidget):
     def _create_control(self, spec):
         control_type = spec.get("type")
         if control_type == "int":
-            control = QSpinBox()
+            control = WheelLockedSpinBox()
+            control.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
             control.setRange(spec.get("min", -2147483648), spec.get("max", 2147483647))
             control.setSingleStep(spec.get("step", 1))
             control.setValue(int(spec.get("default", 0)))
+            control.setMaximumWidth(210)
             return control
         if control_type == "float":
-            control = QDoubleSpinBox()
+            control = WheelLockedDoubleSpinBox()
+            control.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
             control.setRange(spec.get("min", -1e12), spec.get("max", 1e12))
             control.setSingleStep(spec.get("step", 0.1))
             control.setDecimals(spec.get("decimals", 4))
             control.setValue(float(spec.get("default", 0.0)))
+            control.setMaximumWidth(210)
             return control
         if control_type in {"choice", "base_model"}:
-            control = taller_dropdown(QComboBox())
+            if control_type == "base_model":
+                control = taller_dropdown(WheelLockedComboBox())
+                control.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+                control.setMinimumContentsLength(10)
+                control.setMaximumWidth(210)
+            else:
+                control = taller_dropdown(QComboBox())
+                control.setMaximumWidth(210)
             choices = [str(item) for item in spec.get("choices", [])]
             control.addItems(choices)
+            control.setMaxVisibleItems(12)
             default = str(spec.get("default", choices[0] if choices else ""))
             if default:
                 control.setCurrentText(default)
@@ -558,28 +582,67 @@ class UnifiedModelSidebar(QWidget):
         if not isinstance(control, QComboBox):
             return
 
-        current = control.currentText()
-        built_in = [
-            "logistic_regression",
-            "random_forest",
-            "decision_tree",
-            "knn",
-            "svm",
+        current_data = control.currentData()
+        if current_data is None:
+            current_data = control.currentText()
+
+        built_in_catalog = [
+            {"id": "logistic_regression", "label": "Logistic Regression"},
+            {"id": "random_forest", "label": "Random Forest"},
+            {"id": "decision_tree", "label": "Decision Tree"},
+            {"id": "knn", "label": "K-Nearest Neighbors"},
+            {"id": "svm", "label": "Support Vector Machine"},
         ]
-        choices = []
-        for name in built_in + list(self._trained_supervised_names):
-            text = str(name).strip()
-            if text and text not in choices:
-                choices.append(text)
+
+        options = []
+        seen_ids = set()
+        self._base_model_label_map = {}
+
+        for item in built_in_catalog:
+            option_id = f"builtin:{item['id']}"
+            options.append((f"Built-in: {item['label']}", option_id))
+            seen_ids.add(option_id)
+
+        for item in self._supervised_base_catalog:
+            base_id = str(item.get("id", "")).strip()
+            name = str(item.get("name", "")).strip()
+            label = str(item.get("label", "")).strip()
+            source = str(item.get("source", "saved")).strip() or "saved"
+            if not base_id or not name:
+                continue
+            option_id = f"{source}:{base_id}"
+            if option_id in seen_ids:
+                continue
+            seen_ids.add(option_id)
+            options.append((f"Saved: {name}", option_id))
+            if label:
+                self._base_model_label_map[option_id] = label
 
         control.blockSignals(True)
         control.clear()
-        control.addItems(choices)
-        if current in choices:
-            control.setCurrentText(current)
-        elif choices:
+        for text, data in options:
+            control.addItem(text, data)
+
+        fallback_options = [
+            str(spec).strip()
+            for spec in ModelController.get_definition(
+                "semi_supervised", "self_training"
+            ).get("required", {}).get("base_model_name", {}).get("choices", [])
+            if str(spec).strip()
+        ]
+        for fallback in fallback_options:
+            token = f"builtin:{fallback}"
+            if token not in seen_ids:
+                control.addItem(f"Built-in: {fallback.replace('_', ' ').title()}", token)
+                seen_ids.add(token)
+
+        match_index = control.findData(current_data)
+        if match_index >= 0:
+            control.setCurrentIndex(match_index)
+        elif control.count() > 0:
             control.setCurrentIndex(0)
         control.blockSignals(False)
+        self._on_base_model_changed()
 
     def _update_ssl_parameter_visibility(self, *_):
         if self.category_combo.currentText() != "semi_supervised":
@@ -604,9 +667,47 @@ class UnifiedModelSidebar(QWidget):
                 criterion == "k_best",
             )
 
-        #Receive trained supervised display names from the current project
+    def _on_base_model_changed(self, *_):
+        if self.category_combo.currentText() != "semi_supervised":
+            return
+        control = self.required_controls.get("base_model_name")
+        if not isinstance(control, QComboBox):
+            return
+
+        base_choice = control.currentData()
+        if base_choice is None:
+            base_choice = control.currentText()
+        selected_label = self._base_model_label_map.get(str(base_choice), "")
+        if selected_label:
+            self.label_input.setText(selected_label)
+
+    #Receive trained supervised display names from the current project
     def set_trained_supervised_models(self, names):
-        self._trained_supervised_names = [str(name) for name in names if str(name).strip()]
+        catalog = []
+        for item in names:
+            if isinstance(item, dict):
+                model_name = str(item.get("name", "")).strip()
+                model_id = str(item.get("id", model_name)).strip() or model_name
+                if not model_name:
+                    continue
+                catalog.append({
+                    "id": model_id,
+                    "name": model_name,
+                    "label": str(item.get("label", "")).strip(),
+                    "source": str(item.get("source", "saved")).strip() or "saved",
+                })
+                continue
+
+            model_name = str(item).strip()
+            if not model_name:
+                continue
+            catalog.append({
+                "id": model_name,
+                "name": model_name,
+                "label": "",
+                "source": "saved",
+            })
+        self._supervised_base_catalog = catalog
         self._refresh_base_model_control()
 
     def set_base_model_options(self, names):
@@ -647,6 +748,14 @@ class UnifiedModelSidebar(QWidget):
                 criterion_control.currentTextChanged.connect(
                     self._update_ssl_parameter_visibility
                 )
+            base_model_control = self.required_controls.get("base_model_name")
+            if isinstance(base_model_control, QComboBox):
+                try:
+                    base_model_control.currentIndexChanged.disconnect(self._on_base_model_changed)
+                except Exception:
+                    pass
+                base_model_control.currentIndexChanged.connect(self._on_base_model_changed)
+                self._on_base_model_changed()
             self._update_ssl_parameter_visibility()
 
         base_name = definition.get("label", algorithm.replace("_", " ").title())
@@ -671,7 +780,10 @@ class UnifiedModelSidebar(QWidget):
             if isinstance(control, (QSpinBox, QDoubleSpinBox)):
                 values[key] = control.value()
             elif isinstance(control, QComboBox):
-                values[key] = control.currentText()
+                if key == "base_model_name":
+                    values[key] = control.currentData() or control.currentText()
+                else:
+                    values[key] = control.currentText()
             elif isinstance(control, QCheckBox):
                 values[key] = control.isChecked()
             elif isinstance(control, QLineEdit):

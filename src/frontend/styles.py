@@ -53,7 +53,7 @@ def apply_app_styles(window):
             border: 1px solid {BORDER};
             border-radius: 4px;
             background: #ffffff;
-            padding: 2px 7px;
+            padding: 2px 26px 2px 7px;
         }}
         QPushButton {{
             border: none;
@@ -83,7 +83,7 @@ def apply_app_styles(window):
         QPushButton[compactTab="true"] {{
             font-size: 12px;
             min-height: 34px;
-            padding: 5px 0 10px 0;
+            padding: 4px 0 6px 0;
         }}
         QPushButton[tabButton="true"]:checked {{
             color: {DARK_GREEN};

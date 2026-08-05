@@ -2,6 +2,7 @@ import pandas as pd
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -70,6 +71,7 @@ class ModelParameterPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(QLabel("C value"))
         self.svm_c = QDoubleSpinBox()
+        self.svm_c.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
         self.svm_c.setRange(0.01, 100.0)
         self.svm_c.setSingleStep(0.1)
         self.svm_c.setValue(1.0)
@@ -83,6 +85,7 @@ class ModelParameterPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(QLabel("Number of neighbors"))
         self.knn_neighbors = QSpinBox()
+        self.knn_neighbors.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
         self.knn_neighbors.setRange(1, 100)
         self.knn_neighbors.setValue(5)
         layout.addWidget(self.knn_neighbors)
@@ -95,6 +98,7 @@ class ModelParameterPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(QLabel("Max depth (0 = unlimited)"))
         self.tree_max_depth = QSpinBox()
+        self.tree_max_depth.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
         self.tree_max_depth.setRange(0, 100)
         self.tree_max_depth.setValue(0)
         layout.addWidget(self.tree_max_depth)
@@ -107,11 +111,13 @@ class ModelParameterPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(QLabel("Number of trees"))
         self.forest_trees = QSpinBox()
+        self.forest_trees.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
         self.forest_trees.setRange(1, 2000)
         self.forest_trees.setValue(100)
         layout.addWidget(self.forest_trees)
         layout.addWidget(QLabel("Max depth (0 = unlimited)"))
         self.forest_max_depth = QSpinBox()
+        self.forest_max_depth.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
         self.forest_max_depth.setRange(0, 100)
         self.forest_max_depth.setValue(0)
         layout.addWidget(self.forest_max_depth)

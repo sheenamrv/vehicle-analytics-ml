@@ -32,9 +32,11 @@ from PySide6.QtWidgets import (
     QTableView,
     QCheckBox,
     QButtonGroup,
+    QAbstractSpinBox,
     QListWidget,
     QListWidgetItem,
     QSizePolicy,
+    QSplitter,
 )
 from PySide6.QtCore import (
     Qt,
@@ -119,6 +121,7 @@ from src.model.result_builders import (
     generate_model_report_assets,
     render_comparison_metrics_image,
     render_combined_confusion_matrices_image,
+    render_model_specific_comparison_image,
 )
 from src.model.model_utils import prepare_training_data, align_features
 
@@ -247,6 +250,56 @@ class UnifiedModelTrainingWorker(QRunnable):
         self.saved_models = list(saved_models)
         self.signals = WorkerSignals()
 
+    @staticmethod
+    def _build_ssl_training_frame(dataframe, label_column, hide_percent, random_state):
+        frame = dataframe.copy()
+        if frame.empty or label_column not in frame.columns:
+            return frame
+
+        hide_percent = float(hide_percent)
+        if hide_percent <= 0:
+            return frame
+
+        labeled = frame[frame[label_column].notna()].copy()
+        if labeled.empty:
+            return frame
+
+        class_to_indices = {
+            value: list(group.index)
+            for value, group in labeled.groupby(label_column, dropna=True)
+        }
+        if len(class_to_indices) < 2:
+            return frame
+
+        rng = np.random.default_rng(int(random_state))
+        hide_indices = []
+        for _label_value, indexes in class_to_indices.items():
+            if len(indexes) <= 1:
+                continue
+            requested = int(np.floor(len(indexes) * hide_percent / 100.0))
+            max_allowed = len(indexes) - 1
+            hide_count = min(max_allowed, max(0, requested))
+            if hide_count <= 0:
+                continue
+            chosen = rng.choice(indexes, size=hide_count, replace=False)
+            hide_indices.extend(chosen.tolist())
+
+        if hide_indices:
+            frame.loc[hide_indices, label_column] = np.nan
+        return frame
+
+    @staticmethod
+    def _resolve_base_model_reference(token):
+        text = str(token or "").strip()
+        if not text:
+            return "", ""
+        if ":" not in text:
+            if text in {"logistic_regression", "random_forest", "decision_tree", "knn", "svm"}:
+                return "builtin", text
+            return "saved", text
+        source, value = text.split(":", 1)
+        return source.strip().lower(), value.strip()
+
     def run(self):
         try:
             category = self.added_model_entry["category"]
@@ -275,44 +328,88 @@ class UnifiedModelTrainingWorker(QRunnable):
                     "parameters": parameters,
                 }
             elif category == "semi_supervised":
-                base_name = parameters.get("base_model_name", "")
-                base_model_info = next(
-                    (
-                        model
-                        for model in self.saved_models
-                        if model.get("display_name") == base_name
-                        and model.get("category") == "supervised"
-                    ),
-                    None,
-                )
-                use_pretrained_state = base_model_info is not None
+                base_token = parameters.get("base_model_name", "")
+                hide_labeled_percent = float(parameters.pop("hide_labeled_percent", 30.0))
+                base_source, base_reference = self._resolve_base_model_reference(base_token)
+                use_pretrained_state = False
                 base_features = None
+                base_model = None
 
-                if base_model_info is not None:
-                    # Transfer the fitted supervised model into SSL. Its fitted state seeds the first auto-labeling pass before iterative retraining begins
-                    base_model = base_model_info["model"]
+                if base_source == "saved":
+                    base_model_info = next(
+                        (
+                            model
+                            for model in self.saved_models
+                            if model.get("display_name") == base_reference
+                            and model.get("category") == "supervised"
+                        ),
+                        None,
+                    )
+                    if base_model_info is None:
+                        raise ValueError(
+                            "Select a valid saved supervised base model."
+                        )
+                    model_label = str(base_model_info.get("label", "")).strip()
+                    if model_label and self.label_column and model_label != self.label_column:
+                        raise ValueError(
+                            "The selected saved base model label does not match the active dataset label."
+                        )
+                    base_model = base_model_info.get("model")
                     base_features = base_model_info.get("feature_columns") or None
-                elif base_name in {
-                    "logistic_regression",
-                    "random_forest",
-                    "decision_tree",
-                    "knn",
-                    "svm",
-                }:
+                    if base_features and not self.dataframe.empty:
+                        missing = [column for column in base_features if column not in self.dataframe.columns]
+                        if missing:
+                            raise ValueError(
+                                "The selected saved base model requires features not found in the current dataset."
+                            )
+                    use_pretrained_state = True
 
+                elif base_source == "exported":
+                    model_path = Path(base_reference)
+                    if not model_path.exists():
+                        raise ValueError("The selected exported base model file was not found.")
+                    imported_payload = joblib.load(model_path)
+                    imported_model, package_metadata, _ = unpack_model_package(imported_payload)
+                    imported_category = str(package_metadata.get("category", "")).strip().lower()
+                    if imported_model is None or imported_category != "supervised":
+                        raise ValueError("Only supervised exported models can be used for self-training.")
+                    exported_label = str(package_metadata.get("label", "")).strip()
+                    if exported_label and self.label_column and exported_label != self.label_column:
+                        raise ValueError(
+                            "The selected exported base model label does not match the active dataset label."
+                        )
+                    base_features = [str(col) for col in package_metadata.get("feature_columns", []) or []]
+                    if base_features and not self.dataframe.empty:
+                        missing = [column for column in base_features if column not in self.dataframe.columns]
+                        if missing:
+                            raise ValueError(
+                                "The selected exported base model requires features not found in the current dataset."
+                            )
+                    base_model = imported_model
+                    use_pretrained_state = True
+
+                elif base_source == "builtin":
                     base_model = build_model(
-                        base_name,
+                        base_reference,
                         parameters={},
                         random_state=int(common.get("random_state", 42)),
                     )
+
                 else:
                     raise ValueError(
-                        "Select a built-in supervised base model or a trained supervised model."
+                        "Select a built-in supervised base model, saved supervised model, or exported supervised PKL model."
                     )
 
+                ssl_train_df = self._build_ssl_training_frame(
+                    dataframe=self.dataframe,
+                    label_column=self.label_column,
+                    hide_percent=hide_labeled_percent,
+                    random_state=int(common.get("random_state", 42)),
+                )
+
                 result = run_ssl_workflow(
-                    train_df=self.dataframe,
-                    test_df=self.dataframe,
+                    train_df=ssl_train_df,
+                    test_df=ssl_train_df,
                     label=self.label_column,
                     pretrained_model=base_model,
                     features=base_features,
@@ -328,6 +425,7 @@ class UnifiedModelTrainingWorker(QRunnable):
                 parameters["pretrained_state_used"] = bool(
                     getattr(result["ssl_model"], "pretrained_state_used_", False)
                 )
+                parameters["hide_labeled_percent"] = hide_labeled_percent
                 payload = {
                     "name": self.added_model_entry["name"],
                     "category": category,
@@ -771,6 +869,7 @@ class AnalyticsWindow(QMainWindow):
         self.columns = []
         self.project = None
         self.current_project_path = None
+        self._active_project_name = ""
         self.is_dirty = False
         self._suppress_dirty = False
         self.downloads_dir = Path.home() / "Downloads"
@@ -813,8 +912,23 @@ class AnalyticsWindow(QMainWindow):
         apply_app_styles(self)
         self._result_records = []
         self._comparison_records = []
+        self._comparison_selected_names = set()
         self._comparison_metric_image_path = None
         self._comparison_cm_image_path = None
+        self._comparison_model_specific_ssl_image_path = None
+        self._comparison_model_specific_unsup_image_path = None
+        self._comparison_zoom_levels = {
+            "metrics": 1.0,
+            "cm": 1.0,
+            "model_ssl": 1.0,
+            "model_unsup": 1.0,
+        }
+        self._comparison_base_pixmaps = {
+            "metrics": None,
+            "cm": None,
+            "model_ssl": None,
+            "model_unsup": None,
+        }
         self._preview_report_root = Path(tempfile.gettempdir()) / "vehicle_analytics_result_previews"
         self._preview_report_root.mkdir(parents=True, exist_ok=True)
 
@@ -1301,6 +1415,7 @@ class AnalyticsWindow(QMainWindow):
         layout.addWidget(self.chart_z_combo)
 
         self.chart_bins_spin = QSpinBox()
+        self.chart_bins_spin.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
         self.chart_bins_spin.setRange(2, 200)
         self.chart_bins_spin.setValue(24)
         self.chart_bins_label = QLabel("Bins (Histogram only)")
@@ -1419,7 +1534,14 @@ class AnalyticsWindow(QMainWindow):
         controls_layout.addWidget(section_label("COMPARE MODELS"))
         self.comparison_model_list = QListWidget()
         self.comparison_model_list.setMinimumHeight(210)
-        self.comparison_model_list.itemChanged.connect(self.on_comparison_list_changed)
+        self.comparison_model_list.setStyleSheet(
+            "QListWidget { border: 1px solid #9fb8aa; background: #ffffff; }"
+            "QListWidget::item { padding: 3px 8px; }"
+            "QCheckBox { font-weight: bold; font-size: 12px; color: #1f2d24; spacing: 8px; }"
+            "QListWidget::indicator { width: 16px; height: 16px; }"
+            "QListWidget::indicator:unchecked { width: 16px; height: 16px; }"
+            "QListWidget::indicator:checked { width: 16px; height: 16px; }"
+        )
         controls_layout.addWidget(self.comparison_model_list)
 
         selection_buttons = QHBoxLayout()
@@ -1433,7 +1555,13 @@ class AnalyticsWindow(QMainWindow):
 
         controls_layout.addWidget(section_label("COMPARE EXPORT"))
         self.comparison_export_mode = taller_dropdown(QComboBox())
-        self.comparison_export_mode.addItems(["Metrics", "Confusion Matrix", "Both"])
+        self.comparison_export_mode.addItems([
+            "Metric Image",
+            "Confusion Matrix Image",
+            "Semi-Supervised Image",
+            "Unsupervised Image",
+            "Export All 4 Images",
+        ])
         controls_layout.addWidget(self.comparison_export_mode)
         export_png = primary_button("Export PNG")
         export_png.clicked.connect(self.export_comparison_images)
@@ -1750,7 +1878,7 @@ class AnalyticsWindow(QMainWindow):
         self.results_page = QWidget()
         layout = QVBoxLayout(self.results_page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(4)
         self.results_tabs = tab_row(self, ["Results", "Comparisons"], self.on_results_tab_changed, compact=True)
         layout.addLayout(self.results_tabs["layout"])
         self.results_pages = QStackedWidget()
@@ -1762,66 +1890,190 @@ class AnalyticsWindow(QMainWindow):
         results_view = QWidget()
         results_layout = QVBoxLayout(results_view)
         results_layout.setContentsMargins(0, 0, 0, 0)
+        results_layout.setSpacing(6)
         results_layout.addWidget(section_label("TRAINED MODELS"))
         self.results_table = table_view(self.results_model)
+        self.results_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.results_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.results_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.results_table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        trained_models_visible_rows = 12
+        trained_models_height = (
+            self.results_table.horizontalHeader().sizeHint().height()
+            + (self.results_table.verticalHeader().defaultSectionSize() * trained_models_visible_rows)
+            + (self.results_table.frameWidth() * 2)
+        )
+        self.results_table.setMinimumHeight(trained_models_height)
+        self.results_table.setMaximumHeight(trained_models_height)
+        self.results_table.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.results_table.selectionModel().selectionChanged.connect(self.on_result_selection_changed)
         self.results_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.results_table.customContextMenuRequested.connect(self.on_results_context_menu)
-        results_layout.addWidget(self.results_table, 2)
+        results_layout.addWidget(self.results_table, 0)
+
         details_layout = QHBoxLayout()
         details_layout.setSpacing(16)
+
         self.result_training_panel = data_panel(
             "TRAINING INFO", self.result_details_model
         )
+        self.result_training_panel.setFixedHeight(200)
+        self.result_training_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         details_layout.addWidget(self.result_training_panel, 1)
 
         # The right-hand panel changes with the learning category
         self.result_secondary_panel = QWidget()
+        self.result_secondary_panel.setFixedHeight(200)
+        self.result_secondary_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+
         secondary_layout = QVBoxLayout(self.result_secondary_panel)
         secondary_layout.setContentsMargins(0, 0, 0, 0)
         secondary_layout.setSpacing(6)
+
         self.result_secondary_title = QLabel("CONFUSION MATRIX")
         self.result_secondary_title.setProperty("panelTitle", True)
         secondary_layout.addWidget(self.result_secondary_title)
+
         self.result_secondary_table = table_view(self.result_confusion_model)
+        self.result_secondary_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.result_secondary_table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.result_secondary_table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.result_secondary_table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+
         secondary_layout.addWidget(self.result_secondary_table)
         details_layout.addWidget(self.result_secondary_panel, 1)
-        results_layout.addLayout(details_layout, 1)
+        results_layout.addLayout(details_layout, 0)
 
         # Self-training iteration history is SSL-specific
         self.result_ssl_iteration_panel = data_panel(
             "SSL ITERATION PROGRESS", self.result_ssl_iteration_model
         )
+        self.result_ssl_iteration_panel.setMaximumHeight(200)
+        self.result_ssl_iteration_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.result_ssl_iteration_panel.setVisible(False)
-        results_layout.addWidget(self.result_ssl_iteration_panel, 1)
+        results_layout.addWidget(self.result_ssl_iteration_panel, 0)
+        results_layout.addStretch(1)
 
         comparison_view = QWidget()
         comparison_layout = QVBoxLayout(comparison_view)
         comparison_layout.setContentsMargins(0, 0, 0, 0)
-        comparison_layout.setSpacing(16)
+        comparison_layout.setSpacing(12)
 
         comparison_layout.addWidget(section_label("METRICS IMAGE"))
         self.comparison_metric_scroll = QScrollArea()
         self.comparison_metric_scroll.setWidgetResizable(True)
+        self.comparison_metric_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.comparison_metric_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.comparison_metric_scroll.setMinimumHeight(280)
         self.comparison_metric_label = QLabel("Select model(s) to generate metrics comparison image.")
         self.comparison_metric_label.setAlignment(Qt.AlignCenter)
         self.comparison_metric_label.mousePressEvent = lambda event: self.inspect_comparison_image("metrics", event)
         self.comparison_metric_scroll.setWidget(self.comparison_metric_label)
         comparison_layout.addWidget(self.comparison_metric_scroll, 1)
+        metric_controls = QHBoxLayout()
+        metric_zoom_out = secondary_button("-")
+        metric_zoom_out.clicked.connect(lambda: self._change_comparison_zoom("metrics", 0.85))
+        metric_zoom_in = secondary_button("+")
+        metric_zoom_in.clicked.connect(lambda: self._change_comparison_zoom("metrics", 1.15))
+        metric_reset = secondary_button("Reset")
+        metric_reset.clicked.connect(lambda: self._reset_comparison_zoom("metrics"))
+        metric_controls.addWidget(metric_zoom_out)
+        metric_controls.addWidget(metric_zoom_in)
+        metric_controls.addWidget(metric_reset)
+        metric_controls.addStretch()
+        comparison_layout.addLayout(metric_controls)
 
         comparison_layout.addWidget(section_label("COMBINED CONFUSION MATRIX IMAGE"))
         self.comparison_cm_scroll = QScrollArea()
         self.comparison_cm_scroll.setWidgetResizable(True)
+        self.comparison_cm_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.comparison_cm_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.comparison_cm_scroll.setMinimumHeight(280)
         self.comparison_cm_label = QLabel("Select model(s) with confusion matrices to generate combined image.")
         self.comparison_cm_label.setAlignment(Qt.AlignCenter)
         self.comparison_cm_label.mousePressEvent = lambda event: self.inspect_comparison_image("cm", event)
         self.comparison_cm_scroll.setWidget(self.comparison_cm_label)
         comparison_layout.addWidget(self.comparison_cm_scroll, 1)
+        cm_controls = QHBoxLayout()
+        cm_zoom_out = secondary_button("-")
+        cm_zoom_out.clicked.connect(lambda: self._change_comparison_zoom("cm", 0.85))
+        cm_zoom_in = secondary_button("+")
+        cm_zoom_in.clicked.connect(lambda: self._change_comparison_zoom("cm", 1.15))
+        cm_reset = secondary_button("Reset")
+        cm_reset.clicked.connect(lambda: self._reset_comparison_zoom("cm"))
+        cm_controls.addWidget(cm_zoom_out)
+        cm_controls.addWidget(cm_zoom_in)
+        cm_controls.addWidget(cm_reset)
+        cm_controls.addStretch()
+        comparison_layout.addLayout(cm_controls)
+
+        comparison_layout.addWidget(section_label("SEMI-SUPERVISED MODEL-SPECIFIC IMAGE"))
+        self.comparison_model_specific_ssl_scroll = QScrollArea()
+        self.comparison_model_specific_ssl_scroll.setWidgetResizable(True)
+        self.comparison_model_specific_ssl_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.comparison_model_specific_ssl_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.comparison_model_specific_ssl_scroll.setMinimumHeight(260)
+        self.comparison_model_specific_ssl_label = QLabel(
+            "Select semi-supervised models to generate a semi-supervised comparison image."
+        )
+        self.comparison_model_specific_ssl_label.setAlignment(Qt.AlignCenter)
+        self.comparison_model_specific_ssl_label.mousePressEvent = (
+            lambda event: self.inspect_comparison_image("model_specific_ssl", event)
+        )
+        self.comparison_model_specific_ssl_scroll.setWidget(self.comparison_model_specific_ssl_label)
+        comparison_layout.addWidget(self.comparison_model_specific_ssl_scroll, 1)
+        ssl_controls = QHBoxLayout()
+        ssl_zoom_out = secondary_button("-")
+        ssl_zoom_out.clicked.connect(lambda: self._change_comparison_zoom("model_ssl", 0.85))
+        ssl_zoom_in = secondary_button("+")
+        ssl_zoom_in.clicked.connect(lambda: self._change_comparison_zoom("model_ssl", 1.15))
+        ssl_reset = secondary_button("Reset")
+        ssl_reset.clicked.connect(lambda: self._reset_comparison_zoom("model_ssl"))
+        ssl_controls.addWidget(ssl_zoom_out)
+        ssl_controls.addWidget(ssl_zoom_in)
+        ssl_controls.addWidget(ssl_reset)
+        ssl_controls.addStretch()
+        comparison_layout.addLayout(ssl_controls)
+
+        comparison_layout.addWidget(section_label("UNSUPERVISED MODEL-SPECIFIC IMAGE"))
+        self.comparison_model_specific_unsup_scroll = QScrollArea()
+        self.comparison_model_specific_unsup_scroll.setWidgetResizable(True)
+        self.comparison_model_specific_unsup_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.comparison_model_specific_unsup_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.comparison_model_specific_unsup_scroll.setMinimumHeight(260)
+        self.comparison_model_specific_unsup_label = QLabel(
+            "Select unsupervised models to generate an unsupervised comparison image."
+        )
+        self.comparison_model_specific_unsup_label.setAlignment(Qt.AlignCenter)
+        self.comparison_model_specific_unsup_label.mousePressEvent = (
+            lambda event: self.inspect_comparison_image("model_specific_unsup", event)
+        )
+        self.comparison_model_specific_unsup_scroll.setWidget(self.comparison_model_specific_unsup_label)
+        comparison_layout.addWidget(self.comparison_model_specific_unsup_scroll, 1)
+        unsup_controls = QHBoxLayout()
+        unsup_zoom_out = secondary_button("-")
+        unsup_zoom_out.clicked.connect(lambda: self._change_comparison_zoom("model_unsup", 0.85))
+        unsup_zoom_in = secondary_button("+")
+        unsup_zoom_in.clicked.connect(lambda: self._change_comparison_zoom("model_unsup", 1.15))
+        unsup_reset = secondary_button("Reset")
+        unsup_reset.clicked.connect(lambda: self._reset_comparison_zoom("model_unsup"))
+        unsup_controls.addWidget(unsup_zoom_out)
+        unsup_controls.addWidget(unsup_zoom_in)
+        unsup_controls.addWidget(unsup_reset)
+        unsup_controls.addStretch()
+        comparison_layout.addLayout(unsup_controls)
         self.results_pages.addWidget(results_view)
         self.results_pages.addWidget(comparison_view)
-        layout.addWidget(self.results_pages, 1)
-        self.results_page_scroll = self._wrap_main_page(self.results_page)
-        self.main_stack.addWidget(self.results_page_scroll)
+        self.results_pages.currentChanged.connect(self._sync_results_stack_to_current_page)
+        self.results_page_scroll = QScrollArea()
+        self.results_page_scroll.setWidgetResizable(True)
+        self.results_page_scroll.setFrameShape(QFrame.NoFrame)
+        self.results_page_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.results_page_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.results_page_scroll.setWidget(self.results_pages)
+        self._sync_results_stack_to_current_page()
+        layout.addWidget(self.results_page_scroll, 1)
+        self.main_stack.addWidget(self.results_page)
 
 # ============================================================================
 # Navigation & Tab Management
@@ -1858,7 +2110,7 @@ class AnalyticsWindow(QMainWindow):
 
         # Results
         if index == 2:
-            self.main_stack.setCurrentWidget(self.results_page_scroll)
+            self.main_stack.setCurrentWidget(self.results_page)
             self.sidebar_stack.setCurrentWidget(self.results_sidebar)
             self.refresh_results_page()
             return
@@ -2040,6 +2292,23 @@ class AnalyticsWindow(QMainWindow):
         self.results_pages.setCurrentIndex(index)
         if hasattr(self, "results_comparison_controls"):
             self.results_comparison_controls.setVisible(index == 1)
+        self._sync_results_stack_to_current_page()
+
+    def _sync_results_stack_to_current_page(self, index=None):
+        del index
+        if not hasattr(self, "results_pages"):
+            return
+        current_page = self.results_pages.currentWidget()
+        if current_page is None:
+            return
+
+        # Keep the scroll target sized to the active tab only so vertical
+        # scrolling appears only when the visible Results content exceeds
+        # the available viewport.
+        current_page.adjustSize()
+        page_hint = current_page.sizeHint()
+        self.results_pages.setMinimumHeight(max(0, page_hint.height()))
+        self.results_pages.updateGeometry()
 
     @staticmethod
     def _round_metric(value):
@@ -2204,7 +2473,7 @@ class AnalyticsWindow(QMainWindow):
                 records.append({
                     "name": name,
                     "display_name": name,
-                    "label": added.get("label", self.project.get("label_column", "")),
+                    "label": added.get("label") or model.get("label") or self.project.get("label_column", ""),
                     "algorithm": model.get("algorithm", ""),
                     "category": model.get("category") or added.get("category", ""),
                     "metrics": (
@@ -2229,6 +2498,29 @@ class AnalyticsWindow(QMainWindow):
     def _records_to_table_rows(self, records):
         """Create one shared results table while leaving invalid metrics blank."""
         rows = []
+        metric_keys = []
+        static_keys = {
+            "accuracy",
+            "precision",
+            "recall",
+            "f1",
+            "silhouette_score",
+            "davies_bouldin_score",
+            "calinski_harabasz_score",
+            "cluster_count",
+            "noise_count",
+            "note",
+        }
+        for record in records:
+            metrics = record.get("metrics", {}) or {}
+            for key, value in metrics.items():
+                if key in static_keys:
+                    continue
+                if value is None:
+                    continue
+                if key not in metric_keys:
+                    metric_keys.append(key)
+
         for record in records:
             metrics = record.get("metrics", {}) or {}
             evaluation = record.get("evaluation", {}) or {}
@@ -2236,7 +2528,7 @@ class AnalyticsWindow(QMainWindow):
                 str(item.get("status", "")): item.get("count")
                 for item in evaluation.get("ssl_progress", []) or []
             }
-            rows.append({
+            row = {
                 "name": record.get("name", ""),
                 "label": record.get("label") or "N/A",
                 "source": record.get("source", "project"),
@@ -2254,10 +2546,14 @@ class AnalyticsWindow(QMainWindow):
                 "originally_unlabeled": ssl_counts.get("Originally unlabeled"),
                 "pseudo_labeled": ssl_counts.get("Pseudo-labeled"),
                 "remaining_unlabeled": ssl_counts.get("Remaining unlabeled"),
-            })
+            }
+            for key in metric_keys:
+                row[key] = self._round_metric(metrics.get(key))
+            rows.append(row)
         return rows
 
     def refresh_results_page(self):
+        previous_selection = set(self._comparison_selected_names)
         records = self._collect_trained_result_records() if self.project else []
         self._result_records = records
 
@@ -2270,17 +2566,36 @@ class AnalyticsWindow(QMainWindow):
                 "silhouette", "davies_bouldin", "calinski_harabasz",
                 "clusters", "noise", "originally_unlabeled",
                 "pseudo_labeled", "remaining_unlabeled",
+            ] + [
+                key
+                for key in pd.DataFrame(rows).columns
+                if key not in {
+                    "name", "label", "source", "category", "algorithm",
+                    "accuracy", "precision", "recall", "f1",
+                    "silhouette", "davies_bouldin", "calinski_harabasz",
+                    "clusters", "noise", "originally_unlabeled",
+                    "pseudo_labeled", "remaining_unlabeled",
+                }
             ],
         )
         self.results_model.set_data(table)
         self._comparison_records = list(records)
+        self._comparison_selected_names = previous_selection
         self._refresh_comparison_model_list(records)
-        self._clear_comparison_images()
+        if self._comparison_selected_names:
+            selected_records = [
+                record for record in self._comparison_records
+                if record.get("name") in self._comparison_selected_names
+            ]
+            self._render_comparison_images(selected_records)
+        else:
+            self._clear_comparison_images()
         self.result_details_model.set_data(pd.DataFrame())
         self.result_confusion_model.set_data(pd.DataFrame())
         self.result_ssl_iteration_model.set_data(pd.DataFrame())
         self.result_ssl_iteration_panel.setVisible(False)
         self.result_secondary_title.setText("CONFUSION MATRIX")
+        self._sync_results_stack_to_current_page()
 
     def on_result_selection_changed(self, selected, deselected):
         del selected, deselected
@@ -2291,6 +2606,7 @@ class AnalyticsWindow(QMainWindow):
             self.result_ssl_iteration_model.set_data(pd.DataFrame())
             self.result_ssl_iteration_panel.setVisible(False)
             self.result_secondary_title.setText("CONFUSION MATRIX")
+            self._sync_results_stack_to_current_page()
             return
         name = self.results_model._data.iloc[indexes[0].row()]["name"]
         model = next((item for item in self._result_records if item.get("name") == name), {})
@@ -2414,6 +2730,7 @@ class AnalyticsWindow(QMainWindow):
                 if preferred:
                     summary = summary[preferred]
             self.result_confusion_model.set_data(summary)
+            self._sync_results_stack_to_current_page()
             return
 
         self.result_secondary_title.setText("CONFUSION MATRIX")
@@ -2431,6 +2748,8 @@ class AnalyticsWindow(QMainWindow):
                 self.result_confusion_model.set_data(pd.DataFrame())
         else:
             self.result_confusion_model.set_data(pd.DataFrame())
+
+        self._sync_results_stack_to_current_page()
 
     def on_results_context_menu(self, position):
         selected_rows = self.results_table.selectionModel().selectedRows()
@@ -2632,8 +2951,40 @@ class AnalyticsWindow(QMainWindow):
             "",
             "Metrics:",
         ]
+        excluded_for_ssl = {
+            "silhouette_score",
+            "davies_bouldin_score",
+            "calinski_harabasz_score",
+            "cluster_count",
+            "noise_count",
+        }
         for key, value in record.get("metrics", {}).items():
+            if value is None:
+                continue
+            if record.get("category") == "semi_supervised" and key in excluded_for_ssl:
+                continue
             details.append(f"  {key}: {self._round_metric(value)}")
+
+        if record.get("category") == "semi_supervised":
+            status_lookup = {
+                str(item.get("status", "")): item
+                for item in evaluation.get("ssl_progress", []) or []
+            }
+            details.append("")
+            details.append("Semi-Supervised Table Metrics:")
+            for status in [
+                "Originally unlabeled",
+                "Pseudo-labeled",
+                "Remaining unlabeled",
+            ]:
+                item = status_lookup.get(status)
+                if not item:
+                    continue
+                count = item.get("count")
+                percentage = item.get("percentage")
+                details.append(
+                    f"  {status}: count={count}, percentage={self._round_metric(percentage)}"
+                )
         details.append("")
         details.append(f"Confusion Matrix Available: {'Yes' if evaluation.get('confusion_matrix') else 'No'}")
         details.append(f"Report PDF: {evaluation.get('report_pdf', 'Not generated')}")
@@ -2692,6 +3043,7 @@ class AnalyticsWindow(QMainWindow):
             ),
             "ssl_progress": evaluation.get("ssl_progress"),
             "ssl_iteration_progress": evaluation.get("ssl_iteration_progress"),
+            "ssl_export_data": evaluation.get("ssl_export_data"),
             "model": record.get("model"),
             "X": report_context.get("X"),
             "y": report_context.get("y"),
@@ -2721,6 +3073,45 @@ class AnalyticsWindow(QMainWindow):
         feature_columns = record.get("feature_columns", [])
         category = record.get("category", "supervised")
         if category == "unsupervised":
+            evaluation = record.get("evaluation", {}) or {}
+            clustered_rows = evaluation.get("clustered_export_data") or []
+            if not clustered_rows:
+                return context
+            clustered_df = pd.DataFrame(clustered_rows)
+            if clustered_df.empty or "cluster" not in clustered_df.columns:
+                return context
+
+            candidate_features = [
+                str(column)
+                for column in (feature_columns or [])
+                if str(column) in clustered_df.columns
+            ]
+            if not candidate_features:
+                candidate_features = [
+                    str(column)
+                    for column in clustered_df.columns
+                    if str(column) not in {"cluster", "cluster_description"}
+                    and pd.api.types.is_numeric_dtype(clustered_df[column])
+                ]
+            if not candidate_features:
+                return context
+
+            try:
+                X = clustered_df[candidate_features].apply(pd.to_numeric, errors="coerce")
+                y_pred = pd.to_numeric(clustered_df["cluster"], errors="coerce")
+                valid = (~X.isna().any(axis=1)) & y_pred.notna()
+                X = X.loc[valid]
+                y_pred = y_pred.loc[valid]
+                if X.empty:
+                    return context
+            except Exception:
+                return context
+
+            context.update({
+                "is_correlated": False,
+                "X": X.to_numpy(dtype=float),
+                "y_pred": y_pred.to_numpy(dtype=float),
+            })
             return context
         if model_obj is None or not label_col:
             return context
@@ -2774,27 +3165,39 @@ class AnalyticsWindow(QMainWindow):
         return context
 
     def _refresh_comparison_model_list(self, records):
+        available_names = {str(record.get("name", "")) for record in records}
+        self._comparison_selected_names = {
+            name for name in self._comparison_selected_names if name in available_names
+        }
         self.comparison_model_list.blockSignals(True)
         self.comparison_model_list.clear()
         for record in records:
-            item = QListWidgetItem(record.get("name", ""))
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
+            name = record.get("name", "")
+            checkbox = QCheckBox(name)
+            checkbox.setChecked(name in self._comparison_selected_names)
+            checkbox.toggled.connect(self.on_comparison_list_changed)
+            item = QListWidgetItem()
+            item.setSizeHint(checkbox.sizeHint())
             self.comparison_model_list.addItem(item)
+            self.comparison_model_list.setItemWidget(item, checkbox)
         self.comparison_model_list.blockSignals(False)
 
     def select_all_comparison_models(self):
-        self.comparison_model_list.blockSignals(True)
         for index in range(self.comparison_model_list.count()):
-            self.comparison_model_list.item(index).setCheckState(Qt.Checked)
-        self.comparison_model_list.blockSignals(False)
+            checkbox = self.comparison_model_list.itemWidget(self.comparison_model_list.item(index))
+            if checkbox is not None:
+                checkbox.blockSignals(True)
+                checkbox.setChecked(True)
+                checkbox.blockSignals(False)
         self.on_comparison_list_changed(None)
 
     def clear_all_comparison_models(self):
-        self.comparison_model_list.blockSignals(True)
         for index in range(self.comparison_model_list.count()):
-            self.comparison_model_list.item(index).setCheckState(Qt.Unchecked)
-        self.comparison_model_list.blockSignals(False)
+            checkbox = self.comparison_model_list.itemWidget(self.comparison_model_list.item(index))
+            if checkbox is not None:
+                checkbox.blockSignals(True)
+                checkbox.setChecked(False)
+                checkbox.blockSignals(False)
         self.on_comparison_list_changed(None)
 
     def on_comparison_list_changed(self, item):
@@ -2802,25 +3205,102 @@ class AnalyticsWindow(QMainWindow):
         selected_names = []
         for index in range(self.comparison_model_list.count()):
             list_item = self.comparison_model_list.item(index)
-            if list_item.checkState() == Qt.Checked:
-                selected_names.append(list_item.text())
+            checkbox = self.comparison_model_list.itemWidget(list_item)
+            if checkbox is not None and checkbox.isChecked():
+                selected_names.append(checkbox.text())
 
+        self._comparison_selected_names = set(selected_names)
         selected_records = [record for record in self._comparison_records if record.get("name") in selected_names]
         self._render_comparison_images(selected_records)
 
     def _clear_comparison_images(self):
         self._comparison_metric_image_path = None
         self._comparison_cm_image_path = None
+        self._comparison_model_specific_ssl_image_path = None
+        self._comparison_model_specific_unsup_image_path = None
         self.comparison_metric_label.clear()
         self.comparison_metric_label.setText("Select model(s) to generate metrics comparison image.")
         self.comparison_cm_label.clear()
         self.comparison_cm_label.setText("Select model(s) with confusion matrices to generate combined image.")
+        self.comparison_model_specific_ssl_label.clear()
+        self.comparison_model_specific_ssl_label.setText(
+            "Select semi-supervised models to generate a semi-supervised comparison image."
+        )
+        self.comparison_model_specific_unsup_label.clear()
+        self.comparison_model_specific_unsup_label.setText(
+            "Select unsupervised models to generate an unsupervised comparison image."
+        )
+        for key in self._comparison_zoom_levels:
+            self._comparison_zoom_levels[key] = 1.0
+            self._comparison_base_pixmaps[key] = None
+
+    def _comparison_label_for_key(self, image_key):
+        return {
+            "metrics": self.comparison_metric_label,
+            "cm": self.comparison_cm_label,
+            "model_ssl": self.comparison_model_specific_ssl_label,
+            "model_unsup": self.comparison_model_specific_unsup_label,
+        }.get(image_key)
+
+    def _change_comparison_zoom(self, image_key, factor):
+        label = self._comparison_label_for_key(image_key)
+        base_pixmap = self._comparison_base_pixmaps.get(image_key)
+        if label is None or base_pixmap is None or base_pixmap.isNull():
+            return
+        self._comparison_zoom_levels[image_key] = max(
+            0.1,
+            min(8.0, self._comparison_zoom_levels.get(image_key, 1.0) * factor),
+        )
+        self._apply_comparison_zoom(image_key)
+
+    def _reset_comparison_zoom(self, image_key):
+        self._comparison_zoom_levels[image_key] = 1.0
+        self._apply_comparison_zoom(image_key)
+
+    def _apply_comparison_zoom(self, image_key):
+        label = self._comparison_label_for_key(image_key)
+        base_pixmap = self._comparison_base_pixmaps.get(image_key)
+        if label is None or base_pixmap is None or base_pixmap.isNull():
+            return
+        zoom = float(self._comparison_zoom_levels.get(image_key, 1.0))
+        width = max(1, int(base_pixmap.width() * zoom))
+        height = max(1, int(base_pixmap.height() * zoom))
+        scaled = base_pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        label.setPixmap(scaled)
+        label.adjustSize()
+
+    def _set_comparison_image(self, image_key, image_path, empty_text):
+        label = self._comparison_label_for_key(image_key)
+        if label is None:
+            return
+        if image_path is None:
+            self._comparison_base_pixmaps[image_key] = None
+            label.setText(empty_text)
+            label.adjustSize()
+            return
+
+        pixmap = QPixmap(str(image_path))
+        if pixmap.isNull():
+            self._comparison_base_pixmaps[image_key] = None
+            label.setText("Failed to render image.")
+            label.adjustSize()
+            return
+
+        self._comparison_base_pixmaps[image_key] = pixmap
+        self._comparison_zoom_levels[image_key] = 1.0
+        self._apply_comparison_zoom(image_key)
 
     def inspect_comparison_image(self, image_type, event):
         del event
         if image_type == "metrics":
             path = self._comparison_metric_image_path
             title = "Inspect - Comparison Metrics"
+        elif image_type == "model_specific_ssl":
+            path = self._comparison_model_specific_ssl_image_path
+            title = "Inspect - Semi-Supervised Comparison"
+        elif image_type == "model_specific_unsup":
+            path = self._comparison_model_specific_unsup_image_path
+            title = "Inspect - Unsupervised Comparison"
         else:
             path = self._comparison_cm_image_path
             title = "Inspect - Combined Confusion Matrix"
@@ -2833,6 +3313,8 @@ class AnalyticsWindow(QMainWindow):
     def _render_comparison_images(self, selected_records):
         self._comparison_metric_image_path = None
         self._comparison_cm_image_path = None
+        self._comparison_model_specific_ssl_image_path = None
+        self._comparison_model_specific_unsup_image_path = None
         if not selected_records:
             self._clear_comparison_images()
             return
@@ -2843,26 +3325,48 @@ class AnalyticsWindow(QMainWindow):
         metric_path = output_dir / "comparison_metrics.png"
         if render_comparison_metrics_image(selected_records, metric_path):
             self._comparison_metric_image_path = metric_path
-            metric_pixmap = QPixmap(str(metric_path))
-            if not metric_pixmap.isNull():
-                self.comparison_metric_label.setPixmap(metric_pixmap)
-                self.comparison_metric_label.adjustSize()
-            else:
-                self.comparison_metric_label.setText("Failed to render metrics image.")
+            self._set_comparison_image("metrics", metric_path, "No metrics available for selected models.")
         else:
-            self.comparison_metric_label.setText("No metrics available for selected models.")
+            self._set_comparison_image("metrics", None, "No metrics available for selected models.")
 
         cm_path = output_dir / "comparison_combined_cm.png"
         if render_combined_confusion_matrices_image(selected_records, cm_path):
             self._comparison_cm_image_path = cm_path
-            cm_pixmap = QPixmap(str(cm_path))
-            if not cm_pixmap.isNull():
-                self.comparison_cm_label.setPixmap(cm_pixmap)
-                self.comparison_cm_label.adjustSize()
-            else:
-                self.comparison_cm_label.setText("Failed to render combined confusion matrix image.")
+            self._set_comparison_image("cm", cm_path, "No confusion matrices available for selected models.")
         else:
-            self.comparison_cm_label.setText("No confusion matrices available for selected models.")
+            self._set_comparison_image("cm", None, "No confusion matrices available for selected models.")
+
+        ssl_records = [record for record in selected_records if record.get("category") == "semi_supervised"]
+        ssl_model_specific_path = output_dir / "comparison_model_specific_ssl.png"
+        if ssl_records and render_model_specific_comparison_image(ssl_records, ssl_model_specific_path):
+            self._comparison_model_specific_ssl_image_path = ssl_model_specific_path
+            self._set_comparison_image(
+                "model_ssl",
+                ssl_model_specific_path,
+                "No comparable semi-supervised values available for selected models.",
+            )
+        else:
+            self._set_comparison_image(
+                "model_ssl",
+                None,
+                "No comparable semi-supervised values available for selected models.",
+            )
+
+        unsup_records = [record for record in selected_records if record.get("category") == "unsupervised"]
+        unsup_model_specific_path = output_dir / "comparison_model_specific_unsup.png"
+        if unsup_records and render_model_specific_comparison_image(unsup_records, unsup_model_specific_path):
+            self._comparison_model_specific_unsup_image_path = unsup_model_specific_path
+            self._set_comparison_image(
+                "model_unsup",
+                unsup_model_specific_path,
+                "No comparable unsupervised values available for selected models.",
+            )
+        else:
+            self._set_comparison_image(
+                "model_unsup",
+                None,
+                "No comparable unsupervised values available for selected models.",
+            )
 
     def _prompt_png_name(self, title, default_name):
         name, accepted = QInputDialog.getText(self, title, "PNG filename (without extension)", text=default_name)
@@ -2881,7 +3385,7 @@ class AnalyticsWindow(QMainWindow):
 
     def export_comparison_images(self):
         mode = self.comparison_export_mode.currentText()
-        if mode == "Metrics":
+        if mode == "Metric Image":
             if not self._comparison_metric_image_path:
                 QMessageBox.information(self, "No Metrics Image", "Select model(s) to generate a metrics image first.")
                 return
@@ -2892,7 +3396,7 @@ class AnalyticsWindow(QMainWindow):
                 QMessageBox.warning(self, "Export Failed", "Unable to export metrics image.")
             return
 
-        if mode == "Confusion Matrix":
+        if mode == "Confusion Matrix Image":
             if not self._comparison_cm_image_path:
                 QMessageBox.information(self, "No Confusion Image", "Select model(s) with confusion matrix data first.")
                 return
@@ -2903,27 +3407,74 @@ class AnalyticsWindow(QMainWindow):
                 QMessageBox.warning(self, "Export Failed", "Unable to export confusion matrix image.")
             return
 
-        # Both
-        if not self._comparison_metric_image_path or not self._comparison_cm_image_path:
+        if mode == "Semi-Supervised Image":
+            if not self._comparison_model_specific_ssl_image_path:
+                QMessageBox.information(
+                    self,
+                    "No Semi-Supervised Image",
+                    "Select semi-supervised models to generate this image first.",
+                )
+                return
+            filename = self._prompt_png_name("Export Semi-Supervised PNG", "comparison_model_specific_ssl")
+            if not filename:
+                return
+            if not self._export_generated_image(self._comparison_model_specific_ssl_image_path, filename):
+                QMessageBox.warning(self, "Export Failed", "Unable to export semi-supervised image.")
+            return
+
+        if mode == "Unsupervised Image":
+            if not self._comparison_model_specific_unsup_image_path:
+                QMessageBox.information(
+                    self,
+                    "No Unsupervised Image",
+                    "Select unsupervised models to generate this image first.",
+                )
+                return
+            filename = self._prompt_png_name("Export Unsupervised PNG", "comparison_model_specific_unsup")
+            if not filename:
+                return
+            if not self._export_generated_image(self._comparison_model_specific_unsup_image_path, filename):
+                QMessageBox.warning(self, "Export Failed", "Unable to export unsupervised image.")
+            return
+
+        # Export All 4 Images
+        if (
+            not self._comparison_metric_image_path
+            or not self._comparison_cm_image_path
+            or not self._comparison_model_specific_ssl_image_path
+            or not self._comparison_model_specific_unsup_image_path
+        ):
             QMessageBox.information(
                 self,
                 "Missing Images",
-                "Both metrics and combined confusion matrix images must be generated before exporting both.",
+                "Generate metric, confusion matrix, semi-supervised, and unsupervised images before exporting all 4.",
             )
-            return
-        metrics_filename = self._prompt_png_name("Export Metrics PNG", "comparison_metrics")
-        if not metrics_filename:
-            return
-        cm_filename = self._prompt_png_name("Export Confusion Matrix PNG", "comparison_combined_cm")
-        if not cm_filename:
             return
         output_dir = QFileDialog.getExistingDirectory(self, "Choose Export Folder", str(self.downloads_dir))
         if not output_dir:
             return
-        metrics_ok = QPixmap(str(self._comparison_metric_image_path)).save(str(Path(output_dir) / metrics_filename), "PNG")
-        cm_ok = QPixmap(str(self._comparison_cm_image_path)).save(str(Path(output_dir) / cm_filename), "PNG")
-        if not (metrics_ok and cm_ok):
-            QMessageBox.warning(self, "Export Failed", "One or more images could not be exported.")
+        targets = [
+            (self._comparison_metric_image_path, "comparison_metrics.png"),
+            (self._comparison_cm_image_path, "comparison_combined_cm.png"),
+            (self._comparison_model_specific_ssl_image_path, "comparison_model_specific_ssl.png"),
+            (self._comparison_model_specific_unsup_image_path, "comparison_model_specific_unsup.png"),
+        ]
+        failures = []
+        for source_path, filename in targets:
+            if not source_path:
+                continue
+            saved = QPixmap(str(source_path)).save(str(Path(output_dir) / filename), "PNG")
+            if not saved:
+                failures.append(filename)
+
+        if failures:
+            QMessageBox.warning(
+                self,
+                "Export Failed",
+                "One or more images could not be exported:\n" + "\n".join(failures),
+            )
+            return
+        QMessageBox.information(self, "Export Complete", f"Saved comparison images to {output_dir}")
 
     def export_selected_model_reports(self):
         selected_rows = self.results_table.selectionModel().selectedRows()
@@ -2989,6 +3540,7 @@ class AnalyticsWindow(QMainWindow):
                 ),
                 "ssl_progress": evaluation.get("ssl_progress"),
                 "ssl_iteration_progress": evaluation.get("ssl_iteration_progress"),
+                "ssl_export_data": evaluation.get("ssl_export_data"),
                 "model": record.get("model"),
                 "X": report_context.get("X"),
                 "y": report_context.get("y"),
@@ -3060,7 +3612,7 @@ class AnalyticsWindow(QMainWindow):
             return
         self.is_dirty = dirty
         icon = "• " if dirty else ""
-        title = self.project.get("project_name") if self.project else "Classify & Learn Lab"
+        title = self.project.get("project_name") if self.project else (self.project_name.text().strip() or "Classify & Learn Lab")
         self.setWindowTitle(f"{icon}{title}")
 
     def on_project_name_changed(self, text):
@@ -3103,6 +3655,7 @@ class AnalyticsWindow(QMainWindow):
         self.file_path = Path(path)
         self.current_project_path = None
         self.project = None
+        self._active_project_name = ""
         self.project_name.clear()
         self.reset_workflow_state()
         self._suppress_dirty = True
@@ -3201,8 +3754,10 @@ class AnalyticsWindow(QMainWindow):
         self.file_path = Path(self.project.get("file_path", ""))
         self.dataset = self.project.get("dataset", "Data")
         self.columns = list(self.og_df.columns)
+        self._active_project_name = str(self.project.get("project_name") or self.current_project_path.stem or "").strip()
+        self.project["project_name"] = self._active_project_name
         self._suppress_dirty = True
-        self.project_name.setText(self.project.get("project_name", ""))
+        self.project_name.setText(self._active_project_name)
 
         # Populate original_dtypes in-place so delegates stay in sync.
         self.original_dtypes.clear()
@@ -3237,6 +3792,7 @@ class AnalyticsWindow(QMainWindow):
         self.dataset = dataset
         self.current_project_path = None
         self.project = None
+        self._active_project_name = ""
         self.reset_workflow_state()
         self.load_dataset_metadata()
 
@@ -3662,10 +4218,62 @@ class AnalyticsWindow(QMainWindow):
         ModelController.ensure_project_state(self.project)
         self.model_sidebar.set_project_label(self.project.get("label_column", ""))
         trained_supervised = [
-            model.get("display_name", "")
+            {
+                "id": model.get("display_name", ""),
+                "name": model.get("display_name", ""),
+                "label": str(model.get("label") or self.project.get("label_column", "")),
+                "source": "saved",
+            }
             for model in self.project.get("models", [])
-            if model.get("category") == "supervised" and model.get("display_name")
+            if (
+                model.get("category") == "supervised"
+                and model.get("display_name")
+                and model.get("model") is not None
+                and (
+                    not str(model.get("label", "")).strip()
+                    or str(model.get("label", "")).strip()
+                    == str(self.project.get("label_column", "") or "").strip()
+                )
+                and (
+                    not model.get("feature_columns")
+                    or self.working_df.empty
+                    or all(
+                        str(col) in self.working_df.columns
+                        for col in model.get("feature_columns", [])
+                    )
+                )
+            )
         ]
+
+        exported_dir = Path("ExportedModels")
+        if exported_dir.exists():
+            for pkl_path in sorted(exported_dir.glob("*.pkl")):
+                try:
+                    payload = joblib.load(pkl_path)
+                    model_obj, metadata, _ = unpack_model_package(payload)
+                except Exception:
+                    continue
+                if model_obj is None:
+                    continue
+                if str(metadata.get("category", "")).strip().lower() != "supervised":
+                    continue
+                feature_columns = [str(col) for col in metadata.get("feature_columns", []) or []]
+                if feature_columns and not self.working_df.empty and any(
+                    col not in self.working_df.columns for col in feature_columns
+                ):
+                    continue
+                model_label = str(metadata.get("label", "")).strip()
+                project_label = str(self.project.get("label_column", "") or "").strip()
+                if model_label and project_label and model_label != project_label:
+                    continue
+                trained_supervised.append(
+                    {
+                        "id": str(pkl_path.resolve()),
+                        "name": str(metadata.get("display_name") or pkl_path.stem),
+                        "label": model_label,
+                        "source": "exported",
+                    }
+                )
         self.model_sidebar.set_trained_supervised_models(trained_supervised)
         self.unified_model_page.set_added_models(self.project.get("added_models", []))
         self.unified_model_page.set_queue(ModelController.queue_rows(self.project))
@@ -3881,7 +4489,7 @@ class AnalyticsWindow(QMainWindow):
             path, _ = QFileDialog.getSaveFileName(
                 self,
                 "Export Trained Model",
-                str(export_dir / f"{name}.pkl"),
+                str(self.downloads_dir / f"{name}.pkl"),
                 "Pickle Files (*.pkl)",
             )
             if not path:
@@ -4026,6 +4634,10 @@ class AnalyticsWindow(QMainWindow):
             "display_name": name,
             "category": payload.get("category", ""),
             "algorithm": payload["algorithm"],
+            "label": (
+                (ModelController.find_added_model(self.project, name) or {}).get("label")
+                or self.project.get("label_column", "")
+            ),
             "model": payload["trained_model"],
             "parameters": payload["parameters"],
             "metrics": payload.get("metrics", {}),
@@ -4162,6 +4774,7 @@ class AnalyticsWindow(QMainWindow):
             "display_name": name,
             "category": fallback_category,
             "algorithm": algorithm or "external",
+            "label": entry.get("label", ""),
             "model": imported,
             "parameters": saved_parameters,
             "metrics": saved_metrics,
@@ -4611,35 +5224,85 @@ class AnalyticsWindow(QMainWindow):
             else:
                 self.working_df = self.working_df.reindex(columns=columns).copy()
 
-            # Keep project metadata compatible with src.data.process.save_project().
-            self.project = {
-                "project_name": project_name,
-                "file_path": str(self.file_path),
-                "dataset": self.dataset,
-                "selected_columns": list(self.working_df.columns),
-                "label_column": label_col,
-                "column_types": {
+            if self.project is None:
+                # Keep project metadata compatible with src.data.process.save_project().
+                self.project = {
+                    "project_name": project_name,
+                    "file_path": str(self.file_path),
+                    "dataset": self.dataset,
+                    "selected_columns": list(self.working_df.columns),
+                    "label_column": label_col,
+                    "column_types": {
+                        col: str(self.working_df[col].dtype)
+                        for col in self.working_df.columns
+                    },
+                    "preprocessing": [],
+                    "visualizations": [],
+                    "models": [],
+                    "added_models": [],
+                    "model_queue": [],
+                }
+                base_dir = self.current_project_path.parent if self.current_project_path else self.downloads_dir
+                target_path = base_dir / f"{project_name}.icp"
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                self.current_project_path = target_path
+
+                save_project(
+                    self.project,
+                    self.og_df,
+                    self.working_df,
+                    str(self.current_project_path),
+                    feature_df=self.feature_df.copy(),
+                )
+                self._active_project_name = project_name
+                self.project["project_name"] = self._active_project_name
+                self._set_dirty(False)
+            else:
+                active_name = str(
+                    self._active_project_name
+                    or self.project.get("project_name")
+                    or (self.current_project_path.stem if self.current_project_path else "project")
+                ).strip()
+                self._active_project_name = active_name
+                self.project["project_name"] = active_name
+                self.project["selected_columns"] = list(self.working_df.columns)
+                self.project["label_column"] = label_col
+                self.project["column_types"] = {
                     col: str(self.working_df[col].dtype)
                     for col in self.working_df.columns
-                },
-                "preprocessing": [],
-                "visualizations": [],
-                "models": [],
-                "added_models": [],
-                "model_queue": [],
-            }
-            if self.current_project_path is None:
-                self.current_project_path = self._choose_project_save_path(default_name=project_name)
-                if self.current_project_path is None:
-                    return False
-            save_project(
-                self.project,
-                self.og_df,
-                self.working_df,
-                str(self.current_project_path),
-                feature_df=self.feature_df.copy(),
-            )
-            self._set_dirty(False)
+                }
+                self.project["file_path"] = str(self.file_path) if self.file_path is not None else self.project.get("file_path")
+
+                if project_name == active_name:
+                    # Do not create a duplicate copy with the currently active name.
+                    return self.save_current_project()
+
+                base_dir = self.current_project_path.parent if self.current_project_path else self.downloads_dir
+                copy_path = base_dir / f"{project_name}.icp"
+                copy_path.parent.mkdir(parents=True, exist_ok=True)
+                project_copy = dict(self.project)
+                project_copy["project_name"] = project_name
+                save_project(
+                    project_copy,
+                    self.og_df.copy(),
+                    self.working_df.copy(),
+                    str(copy_path),
+                    feature_df=self.feature_df.copy(),
+                )
+
+                # Continue on the active project after creating the copy.
+                self._suppress_dirty = True
+                try:
+                    self.project_name.setText(active_name)
+                finally:
+                    self._suppress_dirty = False
+                self._set_dirty(False)
+                QMessageBox.information(
+                    self,
+                    "Project Copy Created",
+                    f"Saved copy as {copy_path}. Continuing with {active_name}.",
+                )
+                return True
         except Exception as error:
             self.show_error("Save Error", error)
             return False
@@ -4658,11 +5321,17 @@ class AnalyticsWindow(QMainWindow):
         if self.current_project_path is None:
             return self.save_project_as()
 
+        active_name = str(self._active_project_name or self.project.get("project_name") or self.current_project_path.stem or "project").strip()
+        self._active_project_name = active_name
+        self.project["project_name"] = active_name
+
         self.project["selected_columns"] = list(self.working_df.columns)
         self.project["column_types"] = {col: str(self.working_df[col].dtype) for col in self.working_df.columns}
 
         try:
             self.project["file_path"] = str(self.file_path) if self.file_path is not None else self.project.get("file_path")
+            if not self._save_named_copy_if_requested(active_name):
+                return False
             # feature_df is persisted separately from raw and working data so
             # imported/extracted features survive project reloads.
             save_project(
@@ -4679,12 +5348,53 @@ class AnalyticsWindow(QMainWindow):
             self.show_error("Save Error", error)
             return False
 
+    def _save_named_copy_if_requested(self, active_name):
+        requested_name = self.project_name.text().strip()
+        if not requested_name or requested_name == active_name:
+            return True
+
+        copy_path = self.current_project_path.with_name(f"{requested_name}.icp")
+        if copy_path.exists():
+            result = QMessageBox.question(
+                self,
+                "Overwrite Project Copy",
+                f"A project named '{copy_path.name}' already exists. Overwrite it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if result != QMessageBox.StandardButton.Yes:
+                return False
+
+        project_copy = dict(self.project)
+        project_copy["project_name"] = requested_name
+        save_project(
+            project_copy,
+            self.og_df.copy(),
+            self.working_df.copy(),
+            str(copy_path),
+            feature_df=self.feature_df.copy(),
+        )
+
+        # Keep working on the current project after creating the renamed copy.
+        self._suppress_dirty = True
+        try:
+            self.project_name.setText(active_name)
+        finally:
+            self._suppress_dirty = False
+
+        QMessageBox.information(
+            self,
+            "Project Copy Saved",
+            f"Saved copy as {copy_path.name}. Continuing with {active_name}.",
+        )
+        return True
+
     def save_project_as(self):
         if self.project is None:
             QMessageBox.warning(self, "No Project", "Create or open a project before saving.")
             return False
 
-        project_name = self.project.get("project_name") or self.project_name.text().strip() or "project"
+        project_name = self.project_name.text().strip() or self.project.get("project_name") or "project"
         chosen_path = self._choose_project_save_path(default_name=project_name)
         if chosen_path is None:
             return False
@@ -5552,7 +6262,6 @@ class AnalyticsWindow(QMainWindow):
             # label,
         )
         # if self.project is not None:
-        #     configuration = {
         #         "chart_type": self.chart_type_combo.currentText(),
         #         "x_column": self.chart_x_combo.currentText(),
         #         "y_column": self.chart_y_combo.currentText(),
