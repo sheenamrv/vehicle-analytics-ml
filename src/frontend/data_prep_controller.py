@@ -758,7 +758,7 @@ class DataPrepControllerMixin:
         """Return the selected columns, and retain the chosen label"""
         if self.og_df.empty:
             return
-        
+
         columns = self.selected_columns()
 
         if not columns:

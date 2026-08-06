@@ -345,7 +345,7 @@ class ModelTrainingControllerMixin:
                 return
             try:
                 # Export one self-contained PKL package
-                # The fitted estimator, model metadata, metrics, SSL progress, clustering results and parameters 
+                # The fitted estimator, model metadata, metrics, SSL progress, clustering results and parameters
                 package = create_model_package(
                     saved,
                     added_entry=entry,

@@ -416,7 +416,7 @@ class ResultsControllerMixin:
             except Exception:
                 pass
 
-        # Preserve the original dataset with its fitted cluster assignment 
+        # Preserve the original dataset with its fitted cluster assignment
         if "clustered_df" in result:
             try:
                 clustered_export = pd.DataFrame(result["clustered_df"]).copy()
@@ -791,7 +791,7 @@ class ResultsControllerMixin:
         menu.addSeparator()
         menu.addAction("Export Model Report", self.export_selected_model_reports)
 
-        # Dataset export is learning category specific 
+        # Dataset export is learning category specific
         record = self._selected_result_record()
         if record and record.get("category") == "semi_supervised":
             menu.addAction("Export SSL Dataset", self.export_selected_ssl_dataset)
