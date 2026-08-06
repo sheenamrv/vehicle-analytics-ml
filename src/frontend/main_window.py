@@ -141,42 +141,28 @@ from src.model.result_builders import (
 from src.model.model_utils import prepare_training_data, align_features
 
 from src.frontend.results_controller import ResultsControllerMixin
-
 from src.frontend.model_training_controller import ModelTrainingControllerMixin
-
 from src.frontend.data_prep_controller import DataPrepControllerMixin
-
-
-
 from src.frontend.feature_controller import (
     FeatureExtractionControllerMixin,
     FEATURE_CATEGORIES,
     FeaturePickerCompat,
 )
-
 from src.frontend.analysis_visualization_controller import AnalysisVisualizationControllerMixin
-
 from src.frontend.project_controller import ProjectControllerMixin
 
 
-'''
-    Main font end window for the application
-'''
-
-# ============================================================================
-# Constants
-# ============================================================================
-
-# ============================================================================
-# Main Application Window
-# ============================================================================
-
-class AnalyticsWindow(ProjectControllerMixin, AnalysisVisualizationControllerMixin, FeatureExtractionControllerMixin, DataPrepControllerMixin, ModelTrainingControllerMixin, ResultsControllerMixin, QMainWindow):
+class AnalyticsWindow(
+    ProjectControllerMixin,
+    AnalysisVisualizationControllerMixin,
+    FeatureExtractionControllerMixin,
+    DataPrepControllerMixin,
+    ModelTrainingControllerMixin,
+    ResultsControllerMixin,
+    QMainWindow,
+):
     """Main desktop window and shared frontend state."""
 
-# ============================================================================
-# Window Initialization
-# ============================================================================
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Classify & Learn Lab")
@@ -205,16 +191,11 @@ class AnalyticsWindow(ProjectControllerMixin, AnalysisVisualizationControllerMix
         self.latest_correlation_matrix = pd.DataFrame()
         self.feature_use_raw = False
         self.analysis_use_raw = False
+        self.visualization_use_raw = False
         self.analysis_include_label = True
         self.active_analysis = "Correlation"
         self.analysis_cmap = "viridis"
         self.analysis_matrix_type = "Numeric"
-        self.feature_use_raw = False
-        self.analysis_use_raw = False
-        self.visualization_use_raw = False
-        self.active_analysis = "Correlation"
-        self.analysis_include_label = True
-        self.analysis_cmap = "viridis"
 
         # Each table view owns a lightweight model so data refreshes are cheap.
         self.preview_model = PandasTableModel()
@@ -250,10 +231,6 @@ class AnalyticsWindow(ProjectControllerMixin, AnalysisVisualizationControllerMix
         self._preview_report_root = Path(tempfile.gettempdir()) / "vehicle_analytics_result_previews"
         self._preview_report_root.mkdir(parents=True, exist_ok=True)
 
-# ============================================================================
-# Menu Bar
-# ============================================================================
-
     def _build_menu(self):
         open_dataset = QAction("Open Dataset", self)
         open_dataset.triggered.connect(self.browse_dataset)
@@ -276,10 +253,6 @@ class AnalyticsWindow(ProjectControllerMixin, AnalysisVisualizationControllerMix
         file_menu.addAction(export_features)
 
         # Single QAction handles the Save shortcut; avoid QShortcut duplicate.
-
-# ============================================================================
-# Main UI Construction
-# ============================================================================
 
     def _build_ui(self):
         """Build the shell: sidebars on the left, pages on the right."""
@@ -313,9 +286,6 @@ class AnalyticsWindow(ProjectControllerMixin, AnalysisVisualizationControllerMix
             self.on_workflow_tab_changed,
             compact=True,
         )
-        # self.workflow_tabs_container = QWidget()
-        # self.workflow_tabs_container.setLayout(self.workflow_tabs["layout"])
-        # content_layout.addWidget(self.workflow_tabs_container)
         self.workflow_tab_container = QWidget()
         self.workflow_tab_container.setLayout(self.workflow_tabs["layout"])
         content_layout.addWidget(self.workflow_tab_container)
@@ -351,7 +321,6 @@ class AnalyticsWindow(ProjectControllerMixin, AnalysisVisualizationControllerMix
         self.sidebar_stack.addWidget(self.feature_sidebar)
         self.sidebar_stack.addWidget(self.analysis_sidebar)
         self.sidebar_stack.addWidget(self.visualization_sidebar)
-        # self.sidebar_stack.addWidget(self._models_sidebar())
         self.model_sidebar = UnifiedModelSidebar()
         self.model_sidebar.add_model_requested.connect(self.add_or_update_model_definition)
         self.model_sidebar.import_external_requested.connect(self.import_external_model)
@@ -382,98 +351,6 @@ class AnalyticsWindow(ProjectControllerMixin, AnalysisVisualizationControllerMix
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setWidget(page)
         return scroll
-
-# ============================================================================
-# Sidebar Construction
-# ============================================================================
-
-
-
-
-
-    # def _models_sidebar(self):
-    #     """Build training, selection, and testing controls for the Models tab."""
-    #     panel = sidebar_base()
-    #     layout = panel.layout()
-
-    #     layout.addWidget(section_label("TRAIN MODEL"))
-
-    #     self.model_type_combo = taller_dropdown(QComboBox())
-    #     self.model_type_combo.addItems([label for label, _ in MODEL_TYPES])
-    #     self.model_type_combo.currentIndexChanged.connect(self.update_model_parameter_fields)
-    #     layout.addWidget(QLabel("Model Type"))
-    #     layout.addWidget(self.model_type_combo)
-
-    #     self.model_param_panel = ModelParameterPanel()
-    #     layout.addWidget(self.model_param_panel)
-
-    #     self.model_test_size_spin = QDoubleSpinBox()
-    #     self.model_test_size_spin.setRange(0.05, 0.95)
-    #     self.model_test_size_spin.setSingleStep(0.05)
-    #     self.model_test_size_spin.setValue(0.3)
-    #     layout.addWidget(QLabel("Test Split"))
-    #     layout.addWidget(self.model_test_size_spin)
-
-    #     self.model_random_state_spin = QSpinBox()
-    #     self.model_random_state_spin.setRange(0, 9999)
-    #     self.model_random_state_spin.setValue(42)
-    #     layout.addWidget(QLabel("Random State"))
-    #     layout.addWidget(self.model_random_state_spin)
-
-    #     self.model_name_edit = QLineEdit()
-    #     self.model_name_edit.setPlaceholderText("Model display name")
-    #     layout.addWidget(QLabel("Model Name"))
-    #     layout.addWidget(self.model_name_edit)
-
-    #     train_button = primary_button("Train Model")
-    #     train_button.clicked.connect(self.train_new_model_gui)
-    #     layout.addWidget(train_button)
-    #     layout.addWidget(divider())
-
-    #     layout.addWidget(section_label("MANAGE MODELS"))
-
-    #     self.model_select_combo = taller_dropdown(QComboBox())
-    #     self.model_select_combo.currentTextChanged.connect(self.show_model_details_gui)
-    #     layout.addWidget(QLabel("Select Model"))
-    #     layout.addWidget(self.model_select_combo)
-
-    #     delete_button = secondary_button("Delete Selected Model")
-    #     delete_button.clicked.connect(self.delete_selected_model)
-    #     layout.addWidget(delete_button)
-
-    #     self.model_test_picker = ColumnPicker("Search models")
-    #     self.model_test_picker.setMinimumHeight(100)
-    #     layout.addWidget(QLabel("Models to Test"))
-    #     layout.addWidget(self.model_test_picker)
-
-    #     test_button = primary_button("Test Selected Models")
-    #     test_button.clicked.connect(self.test_selected_models_gui)
-    #     layout.addWidget(test_button)
-
-    #     layout.addStretch()
-    #     return panel
-
-
-
-# ============================================================================
-# Workflow Page Construction
-# ============================================================================
-
-    # ============================================================================
-    # Data Type Conversion
-    # ============================================================================
-
-
-
-
-
-
-
-
-
-# ============================================================================
-# Navigation & Tab Management
-# ============================================================================
 
     def on_top_tab_changed(self, index):
         if index < 0 or index >= len(self.top_tabs["buttons"]):
@@ -518,152 +395,6 @@ class AnalyticsWindow(ProjectControllerMixin, AnalysisVisualizationControllerMix
             self.refresh_realtime_dataset()
             return
 
-    # ============================================================================
-    # Models
-    # ============================================================================
-    # def update_model_parameter_fields(self):
-    #     """Swap the visible parameter fields for the selected model type."""
-    #     _, model_type = MODEL_TYPES[self.model_type_combo.currentIndex()]
-    #     self.model_param_panel.set_model_type(model_type)
-
-    # def refresh_models_list(self):
-    #     """Refresh the model dropdown/picker and the saved-models table."""
-    #     names = [m["display_name"] for m in self.project.get("models", [])] if self.project else []
-
-    #     self.model_select_combo.blockSignals(True)
-    #     self.model_select_combo.clear()
-    #     self.model_select_combo.addItems(names)
-    #     self.model_select_combo.blockSignals(False)
-
-    #     self.model_test_picker.blockSignals(True)
-    #     self.model_test_picker.set_items(names, checked=False)
-    #     self.model_test_picker.blockSignals(False)
-
-    #     self.show_model_details_gui()
-
-    # def show_model_details_gui(self):
-    #     """Show details for the selected model, or a summary list if none selected."""
-    #     if not self.project or not self.project.get("models"):
-    #         self.models_title.setText("SAVED MODELS")
-    #         self.models_model.set_data(pd.DataFrame())
-    #         return
-
-    #     name = self.model_select_combo.currentText()
-    #     match = next((m for m in self.project["models"] if m["display_name"] == name), None)
-
-    #     if not match:
-    #         self.models_title.setText("SAVED MODELS")
-    #         rows = [(m["display_name"], m["algorithm"]) for m in self.project["models"]]
-    #         self.models_model.set_data(pd.DataFrame(rows, columns=["display_name", "algorithm"]))
-    #         return
-
-    #     self.models_title.setText(f"MODEL DETAILS - {match['display_name']}")
-    #     rows = [("algorithm", match["algorithm"])]
-    #     for key, value in match.get("parameters", {}).items():
-    #         rows.append((f"param: {key}", value))
-    #     for key, value in match.get("metrics", {}).items():
-    #         rows.append((f"metric: {key}", round(value, 4) if isinstance(value, float) else value))
-    #     self.models_model.set_data(pd.DataFrame(rows, columns=["field", "value"]))
-
-    # def train_new_model_gui(self):
-    #     """Train a model using the sidebar's selections and add it to the project."""
-    #     if not self.project:
-    #         QMessageBox.warning(self, "No Project", "Create or load a project before training a model.")
-    #         return
-
-    #     df = self.working_df if not self.working_df.empty else self.og_df
-    #     label = self.project.get("label_column") or self.get_selected_label()
-
-    #     valid, message = validate_dataset(df, label)
-    #     if not valid:
-    #         QMessageBox.warning(self, "Invalid Dataset", message)
-    #         return
-
-    #     try:
-    #         X, y = prepare_training_data(df, label)
-    #         feature_columns = X.columns.tolist()
-    #         _, model_type = MODEL_TYPES[self.model_type_combo.currentIndex()]
-    #         parameters = self.model_param_panel.get_parameters()
-    #         config = {
-    #             "test_size": self.model_test_size_spin.value(),
-    #             "random_state": self.model_random_state_spin.value(),
-    #         }
-    #         model = build_model(model_type, parameters)
-    #         trained_model, metrics = build_model(model_type, parameters), {"accuracy": None}
-    #     except Exception as error:
-    #         self.show_error("Training Error", error)
-    #         return
-
-    #     display_name = self.model_name_edit.text().strip() or (
-    #         f"{model_type}_{len(self.project.get('models', [])) + 1}"
-    #     )
-
-    #     add_model(self.project, trained_model, display_name, model_type, {**config, **parameters}, metrics, feature_columns)
-    #     self._set_dirty(True)
-    #     self.model_name_edit.clear()
-    #     self.refresh_models_list()
-    #     QMessageBox.information(self, "Model Trained", f"'{display_name}' trained and added to the project.")
-
-    # def delete_selected_model(self):
-    #     """Delete the model currently selected in the sidebar dropdown."""
-    #     if not self.project or not self.project.get("models"):
-    #         return
-
-    #     name = self.model_select_combo.currentText()
-    #     if not name:
-    #         return
-
-    #     result = QMessageBox.question(
-    #         self,
-    #         "Confirm Delete",
-    #         f"Delete model '{name}'?",
-    #         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-    #         QMessageBox.StandardButton.No,
-    #     )
-    #     if result != QMessageBox.StandardButton.Yes:
-    #         return
-
-    #     delete_model(self.project, name)
-    #     self._set_dirty(True)
-    #     self.refresh_models_list()
-
-    # def test_selected_models_gui(self):
-    #     """Test the checked models from the picker against the working dataset."""
-    #     if not self.project or not self.project.get("models"):
-    #         QMessageBox.warning(self, "No Models", "Train or load at least one model first.")
-    #         return
-
-    #     names = self.model_test_picker.selected_items()
-    #     if not names:
-    #         QMessageBox.warning(self, "No Selection", "Select at least one model to test.")
-    #         return
-
-    #     df = self.working_df if not self.working_df.empty else self.og_df
-    #     label = self.project.get("label_column") or self.get_selected_label()
-    #     models = [m for m in self.project["models"] if m["display_name"] in names]
-
-    #     try:
-    #         results = test_models_current_data(models, df, label)
-    #     except Exception as error:
-    #         self.show_error("Test Error", error)
-    #         return
-
-    #     rows = [
-    #         {
-    #             "model": r["name"],
-    #             "accuracy": round(r["accuracy"], 4),
-    #             "precision": round(r["precision"], 4),
-    #             "recall": round(r["recall"], 4),
-    #             "f1": round(r["f1"], 4),
-    #         }
-    #         for r in results
-    #     ]
-    #     self.models_title.setText("MODEL TEST RESULTS")
-    #     self.models_model.set_data(pd.DataFrame(rows))
-        # self.top_tabs["buttons"][index].setChecked(True)
-        # self.workflow_tab_container.setVisible(True)
-        # self.on_workflow_tab_changed(self.workflow_tabs["group"].checkedId())
-
     def on_workflow_tab_changed(self, index):
         """Switch the Data & Features workflow page and sidebar."""
         if index < 0 or index >= len(self.workflow_tabs["buttons"]):
@@ -678,42 +409,6 @@ class AnalyticsWindow(ProjectControllerMixin, AnalysisVisualizationControllerMix
         if index == 3:
             self.refresh_visualization_summary()
             self.render_visualization()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     def _set_dirty(self, dirty=True):
         if self._suppress_dirty and dirty:
@@ -743,181 +438,7 @@ class AnalyticsWindow(ProjectControllerMixin, AnalysisVisualizationControllerMix
                 return
         event.accept()
 
-# ============================================================================
-# Dataset & Project Loading
-# ============================================================================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    # ============================================================================
-    # Supervised Models
-    # ============================================================================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# ============================================================================
-# Project Management
-# ============================================================================
-
-
-
-
-
-
-# ============================================================================
-# Import Page Refresh
-# ============================================================================
-
-
-
-
-    # ============================================================================
-    # Feature Extraction
-    # ============================================================================
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    # ============================================================================
-    # Analysis
-    # ============================================================================
-
-
-
-
-
-
-
-
-
-
-    # ============================================================================
-    # Visualization
-    # ============================================================================
-
-
-
-        # Keep these choices synchronized with visualization_validation_error;
-        # filtering improves UX while validation remains the safety boundary.
-        # df = self.working_df if not self.working_df.empty else self.og_df
-        # numeric = [str(column) for column in df.select_dtypes(include="number").columns] if not df.empty else []
-        # temporal = [str(column) for column in df.select_dtypes(include=["datetime", "datetimetz"]).columns] if not df.empty else []
-        # categorical = [str(column) for column in df.columns if str(column) not in numeric and str(column) not in temporal] if not df.empty else []
-        # x_choices, y_choices = numeric, numeric
-        # if chart_type == "Line":
-        #     x_choices = numeric + temporal
-        # elif chart_type == "Bar Chart":
-        #     x_choices = categorical
-        # elif chart_type == "Grouped Box Plot":
-        #     x_choices = categorical
-
-        # for combo, choices in ((self.chart_x_combo, x_choices), (self.chart_y_combo, y_choices)):
-        #     current = combo.currentText()
-        #     combo.blockSignals(True)
-        #     combo.clear()
-        #     combo.addItems(choices)
-        #     if current in choices:
-        #         combo.setCurrentText(current)
-        #     combo.blockSignals(False)
-        # # Extension point: keep this mapping aligned with CHART_TYPES.
-        # needs_y = chart_type in ("Scatter", "Line", "Bar Chart", "Grouped Box Plot")
-        # needs_x = chart_type in (
-        #     "Histogram",
-        #     "Scatter",
-        #     "Line",
-        #     "Box Plot",
-        #     "Bar Chart",
-        #     "Grouped Box Plot",
-        # )
-        # self.chart_x_combo.setEnabled(needs_x)
-        # self.chart_y_combo.setEnabled(needs_y)
-        # self.chart_label_combo.setEnabled(chart_type == "Scatter")
-
-        # if self.project is not None:
-        #         "chart_type": self.chart_type_combo.currentText(),
-        #         "x_column": self.chart_x_combo.currentText(),
-        #         "y_column": self.chart_y_combo.currentText(),
-        #         "group_column": label or None,
-        #     }
-        #     visualizations = self.project.setdefault("visualizations", [])
-        #     if not visualizations or visualizations[-1] != configuration:
-        #         visualizations.append(configuration)
-        #         self._set_dirty(True)
-
-
-
-
-
-
-
-
-    # For Playback, ML Prediction, and Annotation
-    
-    # Return the active imported dataset 
+    # Playback and annotation always use the active imported dataset.
     def _active_realtime_dataset(self):
         return PlaybackAnnotationManager.active_dataset(self.working_df, self.og_df)
 
@@ -926,8 +447,5 @@ class AnalyticsWindow(ProjectControllerMixin, AnalysisVisualizationControllerMix
         if hasattr(self, "playback_page"):
             self.playback_page.sync_dataset()
 
-    # ============================================================================
-    # Utility Functions
-    # ============================================================================
     def show_error(self, title, error):
         QMessageBox.critical(self, title, str(error))
