@@ -150,6 +150,7 @@ from src.frontend.feature_controller import (
 )
 from src.frontend.analysis_visualization_controller import AnalysisVisualizationControllerMixin
 from src.frontend.project_controller import ProjectControllerMixin
+from src.frontend.app_identity import APP_DISPLAY_NAME, application_icon
 
 
 class AnalyticsWindow(
@@ -165,7 +166,8 @@ class AnalyticsWindow(
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Classify & Learn Lab")
+        self.setWindowTitle(APP_DISPLAY_NAME)
+        self.setWindowIcon(application_icon())
         self.resize(1180, 760)
 
         self.file_path = None
@@ -415,7 +417,7 @@ class AnalyticsWindow(
             return
         self.is_dirty = dirty
         icon = "• " if dirty else ""
-        title = self.project.get("project_name") if self.project else (self.project_name.text().strip() or "Classify & Learn Lab")
+        title = self.project.get("project_name") if self.project else (self.project_name.text().strip() or APP_DISPLAY_NAME)
         self.setWindowTitle(f"{icon}{title}")
 
     def on_project_name_changed(self, text):
