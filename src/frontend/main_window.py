@@ -6,7 +6,7 @@ import joblib
 
 import numpy as np
 import pandas as pd
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QColor
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
@@ -41,8 +41,6 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import (
     Qt,
     QThreadPool,
-    QAbstractTableModel,
-    QModelIndex,
     QItemSelectionModel,
 )
 from sklearn.cluster import AgglomerativeClustering, DBSCAN, KMeans
@@ -81,6 +79,15 @@ from src.feature.feature import (
 )
 from src.frontend.charts import ChartCanvas
 from src.frontend.data_summary import file_summary, missing_summary
+from src.frontend.data_quality_dialog import (
+    DataQualityDialog,
+    QualityIssueTableModel,
+)
+from src.frontend.image_dialogs import (
+    ImageInspectDialog,
+    ReportImagesDialog,
+    WindowPreviewDialog,
+)
 from src.frontend.unified_model_panel import (
     UnifiedModelPage,
     UnifiedModelSidebar,
@@ -128,48 +135,6 @@ from src.model.result_builders import (
 from src.model.model_utils import prepare_training_data, align_features
 
 
-class QualityIssueTableModel(QAbstractTableModel):
-    def __init__(self, data):
-        super().__init__()
-        self._data = data.copy()
-
-    def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self._data.index)
-
-    def columnCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self._data.columns)
-
-    def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid():
-            return None
-
-        if role in (Qt.DisplayRole, Qt.ToolTipRole):
-            value = self._data.iat[index.row(), index.column()]
-            if pd.isna(value):
-                return ""
-            return str(value)
-
-        if role == Qt.BackgroundRole:
-            column_name = self._data.columns[index.column()]
-            value = self._data.iat[index.row(), index.column()]
-            issue_type = self._data.iloc[index.row()]["issue"]
-
-            if pd.isna(value) and column_name not in ("issue", "__original_index__"):
-                return QColor("#fff3c4")
-            if "Duplicate" in str(issue_type):
-                return QColor("#e8f4ff")
-
-        return None
-
-    def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if role != Qt.DisplayRole:
-            return None
-
-        if orientation == Qt.Horizontal:
-            return str(self._data.columns[section])
-        return str(self._data.index[section])
-
-
 class FeaturePickerCompat:
     """Compatibility shim for legacy code/tests expecting a single feature picker."""
 
@@ -195,272 +160,6 @@ class FeaturePickerCompat:
         for picker in self.window.feature_category_pickers.values():
             available = set(picker.checkboxes.keys())
             picker.set_selected([label for label in desired_labels if label in available])
-
-
-class DataQualityDialog(QDialog):
-    def __init__(self, parent, working_df):
-        super().__init__(parent)
-        self.setWindowTitle("Review Missing and Duplicate Rows")
-        self.setMinimumSize(1000, 520)
-
-        self.issue_df = self._build_issue_df(working_df)
-        self.removed_indices = []
-
-        layout = QVBoxLayout(self)
-
-        if self.issue_df.empty:
-            layout.addWidget(QLabel("No missing values or duplicate rows were found."))
-            close_button = QPushButton("Close")
-            close_button.clicked.connect(self.reject)
-            layout.addWidget(close_button)
-            return
-
-        self.issue_model = QualityIssueTableModel(self.issue_df)
-        self.table = table_view(self.issue_model)
-        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setSelectionBehavior(QTableView.SelectRows)
-        layout.addWidget(self.table)
-
-        button_layout = QHBoxLayout()
-        remove_button = QPushButton("Remove Selected Rows")
-        remove_button.clicked.connect(self.on_remove_selected)
-        cancel_button = QPushButton("Cancel")
-        cancel_button.clicked.connect(self.reject)
-
-        button_layout.addStretch()
-        button_layout.addWidget(remove_button)
-        button_layout.addWidget(cancel_button)
-        layout.addLayout(button_layout)
-
-    def _build_issue_df(self, df):
-        if df.empty:
-            return pd.DataFrame()
-
-        missing = set(df[df.isna().any(axis=1)].index.tolist())
-        duplicates = set(df[df.duplicated(keep=False)].index.tolist())
-        issue_rows = []
-
-        for row_index in sorted(missing.union(duplicates)):
-            row = df.loc[row_index].copy()
-            issue_labels = []
-            if row_index in missing:
-                issue_labels.append("Missing")
-            if row_index in duplicates:
-                issue_labels.append("Duplicate")
-            row["issue"] = " & ".join(issue_labels)
-            row["__original_index__"] = row_index
-            issue_rows.append(row)
-
-        if not issue_rows:
-            return pd.DataFrame()
-
-        issue_df = pd.DataFrame(issue_rows)
-        columns = ["__original_index__", "issue"] + [c for c in issue_df.columns if c not in ("__original_index__", "issue")]
-        return issue_df[columns]
-
-    def on_remove_selected(self):
-        selected_rows = self.table.selectionModel().selectedRows()
-        if not selected_rows:
-            QMessageBox.warning(self, self.windowTitle(), "Select at least one row to remove.")
-            return
-
-        indices = sorted({
-            self.issue_df.iloc[index.row()]["__original_index__"]
-            for index in selected_rows
-        })
-
-        result = QMessageBox.question(
-            self,
-            "Confirm Removal",
-            f"Remove {len(indices)} selected row(s) from the working dataset?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-
-        if result == QMessageBox.StandardButton.Yes:
-            self.removed_indices = indices
-            self.accept()
-
-
-class ReportImagesDialog(QDialog):
-    def __init__(self, parent, title, image_paths):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setMinimumSize(980, 680)
-        self._images = [Path(path) for path in image_paths if Path(path).exists()]
-        self._index = 0
-        self._current_image_path = None
-        self._zoom = 1.0
-
-        layout = QVBoxLayout(self)
-
-        self.image_name = QLabel("")
-        layout.addWidget(self.image_name)
-
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.scroll.setWidget(self.image_label)
-        layout.addWidget(self.scroll, 1)
-
-        controls = QHBoxLayout()
-        self.prev_button = secondary_button("Previous")
-        self.prev_button.clicked.connect(lambda: self._step(-1))
-        self.next_button = secondary_button("Next")
-        self.next_button.clicked.connect(lambda: self._step(1))
-        zoom_out = secondary_button("-")
-        zoom_out.clicked.connect(lambda: self._change_zoom(0.85))
-        zoom_in = secondary_button("+")
-        zoom_in.clicked.connect(lambda: self._change_zoom(1.15))
-        reset_zoom = secondary_button("Reset")
-        reset_zoom.clicked.connect(self._reset_zoom)
-        close_button = primary_button("Close")
-        close_button.clicked.connect(self.accept)
-
-        controls.addWidget(self.prev_button)
-        controls.addWidget(self.next_button)
-        controls.addWidget(zoom_out)
-        controls.addWidget(zoom_in)
-        controls.addWidget(reset_zoom)
-        controls.addStretch()
-        controls.addWidget(close_button)
-        layout.addLayout(controls)
-
-        self._refresh_view()
-
-    def _step(self, delta):
-        if not self._images:
-            return
-        self._index = (self._index + delta) % len(self._images)
-        self._refresh_view()
-
-    def _refresh_view(self):
-        if not self._images:
-            self.image_name.setText("No report images were found for this model.")
-            self.image_label.clear()
-            self.prev_button.setEnabled(False)
-            self.next_button.setEnabled(False)
-            return
-
-        image_path = self._images[self._index]
-        self._current_image_path = image_path
-        self._zoom = 1.0
-        self._apply_zoomed_pixmap()
-
-        pixmap = QPixmap(str(image_path))
-        if pixmap.isNull():
-            self.image_name.setText(f"Could not load image: {image_path.name}")
-            self.image_label.clear()
-        else:
-            self.image_name.setText(f"{self._index + 1}/{len(self._images)} - {image_path.name}")
-
-        enable_nav = len(self._images) > 1
-        self.prev_button.setEnabled(enable_nav)
-        self.next_button.setEnabled(enable_nav)
-
-    def _change_zoom(self, factor):
-        if self._current_image_path is None:
-            return
-        self._zoom = max(0.1, min(6.0, self._zoom * factor))
-        self._apply_zoomed_pixmap()
-
-    def _reset_zoom(self):
-        self._zoom = 1.0
-        self._apply_zoomed_pixmap()
-
-    def _apply_zoomed_pixmap(self):
-        if self._current_image_path is None:
-            return
-        pixmap = QPixmap(str(self._current_image_path))
-        if pixmap.isNull():
-            self.image_label.clear()
-            return
-        width = max(1, int(pixmap.width() * self._zoom))
-        height = max(1, int(pixmap.height() * self._zoom))
-        scaled = pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.image_label.setPixmap(scaled)
-        self.image_label.adjustSize()
-
-
-class WindowPreviewDialog(QDialog):
-    def __init__(self, parent, preview_df):
-        super().__init__(parent)
-        self.setWindowTitle("Window Segmentation Preview")
-        self.setMinimumSize(860, 520)
-
-        layout = QVBoxLayout(self)
-        title = QLabel("Preview of generated windows before feature extraction")
-        title.setProperty("panelTitle", True)
-        layout.addWidget(title)
-
-        self.model = PandasTableModel(preview_df)
-        self.table = table_view(self.model)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        layout.addWidget(self.table, 1)
-
-        controls = QHBoxLayout()
-        controls.addStretch()
-        close_button = primary_button("Close")
-        close_button.clicked.connect(self.accept)
-        controls.addWidget(close_button)
-        layout.addLayout(controls)
-
-
-class ImageInspectDialog(QDialog):
-    def __init__(self, parent, title, image_path):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setMinimumSize(980, 720)
-        self._base_pixmap = QPixmap(str(image_path))
-        self._zoom = 1.0
-
-        layout = QVBoxLayout(self)
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.scroll.setWidget(self.image_label)
-        layout.addWidget(self.scroll, 1)
-
-        controls = QHBoxLayout()
-        zoom_out = secondary_button("-")
-        zoom_out.clicked.connect(lambda: self._change_zoom(0.85))
-        zoom_in = secondary_button("+")
-        zoom_in.clicked.connect(lambda: self._change_zoom(1.15))
-        reset = secondary_button("Reset")
-        reset.clicked.connect(self._reset_zoom)
-        close_button = primary_button("Close")
-        close_button.clicked.connect(self.accept)
-
-        controls.addWidget(zoom_out)
-        controls.addWidget(zoom_in)
-        controls.addWidget(reset)
-        controls.addStretch()
-        controls.addWidget(close_button)
-        layout.addLayout(controls)
-
-        self._apply_zoom()
-
-    def _change_zoom(self, factor):
-        if self._base_pixmap.isNull():
-            return
-        self._zoom = max(0.1, min(6.0, self._zoom * factor))
-        self._apply_zoom()
-
-    def _reset_zoom(self):
-        self._zoom = 1.0
-        self._apply_zoom()
-
-    def _apply_zoom(self):
-        if self._base_pixmap.isNull():
-            self.image_label.setText("Unable to load image.")
-            return
-        width = max(1, int(self._base_pixmap.width() * self._zoom))
-        height = max(1, int(self._base_pixmap.height() * self._zoom))
-        scaled = self._base_pixmap.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.image_label.setPixmap(scaled)
-        self.image_label.adjustSize()
 
 
 '''
