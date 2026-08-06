@@ -77,6 +77,12 @@ from src.feature.feature import (
     feature_extract,
     to_feature_label,
 )
+from src.frontend.chart_specs import (
+    CHART_TYPES,
+    chart_column_options,
+    get_chart_spec,
+    visualization_validation_error,
+)
 from src.frontend.charts import ChartCanvas
 from src.frontend.data_summary import file_summary, missing_summary
 from src.frontend.data_quality_dialog import (
@@ -198,22 +204,6 @@ FEATURE_CATEGORIES = {
         ("Range [Numeric / Non-Numeric]", "range"),
     ],
 }
-
-CHART_TYPES = [
-    # Extension point: add Visualization-tab chart names here, then route them
-    # in ChartCanvas.plot() and update_chart_controls().
-    "Histogram",
-    "Scatter",
-    "Line",
-    "Box Plot",
-    "Bar Chart",
-    "Grouped Box Plot",
-    "Class Separation",
-    "3D Scatter",
-    "Time Series (All Signals)",
-    "Feature Distribution Comparison",
-]
-
 
 # ============================================================================
 # Main Application Window
@@ -5452,26 +5442,13 @@ class AnalyticsWindow(QMainWindow):
         date_columns = self.date_columns(use_raw=self.visualization_use_raw)
         categorical_columns = self.categorical_columns(use_raw=self.visualization_use_raw)
         chart_type = self.chart_type_combo.currentText()
-        if chart_type in ("Histogram", "Box Plot", "Scatter", "Class Separation", "3D Scatter"):
-            x_options = list(dict.fromkeys(numeric_columns))
-            y_options = list(dict.fromkeys(numeric_columns))
-            z_options = list(dict.fromkeys(numeric_columns))
-        elif chart_type == "Line":
-            x_options = list(dict.fromkeys(date_columns + categorical_columns + list(df.columns)))
-            y_options = list(dict.fromkeys(numeric_columns))
-            z_options = []
-        elif chart_type == "Bar Chart":
-            x_options = categorical_columns or list(df.columns)
-            y_options = numeric_columns or list(df.columns)
-            z_options = []
-        elif chart_type == "Grouped Box Plot":
-            x_options = categorical_columns or list(df.columns)
-            y_options = numeric_columns or list(df.columns)
-            z_options = []
-        else:
-            x_options = list(df.columns)
-            y_options = list(df.columns)
-            z_options = list(df.columns)
+        x_options, y_options, z_options = chart_column_options(
+            chart_type=chart_type,
+            all_columns=df.columns,
+            numeric_columns=numeric_columns,
+            date_columns=date_columns,
+            categorical_columns=categorical_columns,
+        )
 
         for combo, options in ((self.chart_x_combo, x_options), (self.chart_y_combo, y_options), (self.chart_z_combo, z_options)):
             combo.blockSignals(True)
@@ -5519,32 +5496,13 @@ class AnalyticsWindow(QMainWindow):
     def update_chart_controls(self):
         """Enable only the chart inputs required by the selected chart type."""
         chart_type = self.chart_type_combo.currentText()
-        needs_y = chart_type in (
-            "Scatter", "Line", "Bar Chart", "Grouped Box Plot",
-            "Class Separation", "3D Scatter",
-        )
-        needs_x = chart_type in (
-            "Histogram", "Scatter", "Line", "Box Plot", "Bar Chart",
-            "Grouped Box Plot", "Class Separation", "3D Scatter",
-        )
-        needs_z = chart_type == "3D Scatter"
-        needs_bins = chart_type == "Histogram"
-        needs_multi = chart_type in ("Time Series (All Signals)", "Feature Distribution Comparison")
-        needs_lines = chart_type in ("Histogram", "Box Plot")
-
-        field_label = {
-            "Histogram": "Numeric X column",
-            "Scatter": "Numeric X/Y columns",
-            "Line": "Date, category, or text X column with numeric Y values",
-            "Box Plot": "Numeric column",
-            "Bar Chart": "Category + numeric value",
-            "Grouped Box Plot": "Category + numeric value",
-            "Class Separation": "Numeric X/Y columns",
-            "3D Scatter": "Numeric X/Y/Z columns",
-            "Time Series (All Signals)": "Numeric signal columns",
-            "Feature Distribution Comparison": "Numeric signal columns",
-            "Correlation Heatmap": "Numeric columns",
-        }.get(chart_type, "Columns")
+        spec = get_chart_spec(chart_type)
+        needs_x = spec.needs_x if spec is not None else False
+        needs_y = spec.needs_y if spec is not None else False
+        needs_z = spec.needs_z if spec is not None else False
+        needs_bins = spec.needs_bins if spec is not None else False
+        needs_multi = spec.needs_multi if spec is not None else False
+        needs_lines = spec.needs_lines if spec is not None else False
 
         self.chart_x_combo.setVisible(needs_x)
         self.chart_y_combo.setVisible(needs_y)
@@ -5640,25 +5598,12 @@ class AnalyticsWindow(QMainWindow):
 
     @staticmethod
     def visualization_validation_error(df, chart_type, x_column, y_column):
-        # This method is intentionally UI-independent so chart rules can be
-        # unit-tested without rendering a Matplotlib canvas.
-        numeric = lambda column: column in df.columns and pd.api.types.is_numeric_dtype(df[column])
-        if chart_type in ("Histogram", "Box Plot") and not numeric(x_column):
-            return f"{chart_type} requires one numeric primary column."
-        if chart_type == "Scatter" and not (numeric(x_column) and numeric(y_column)):
-            return "Scatter plots require numeric X and Y columns."
-        if chart_type == "Line":
-            if x_column not in df.columns:
-                return "Line charts require an X column."
-            if not (numeric(x_column) or pd.api.types.is_datetime64_any_dtype(df[x_column])):
-                return "Line charts require a numeric or datetime X column."
-            if not numeric(y_column):
-                return "Line charts require a numeric Y column."
-        if chart_type == "Bar Chart" and (x_column not in df.columns or not numeric(y_column)):
-            return "Bar charts require a categorical X column and numeric Y column."
-        if chart_type == "Grouped Box Plot" and (x_column not in df.columns or numeric(x_column) or not numeric(y_column)):
-            return "Grouped box plots require a categorical X column and numeric Y column."
-        return None
+        return visualization_validation_error(
+            df,
+            chart_type,
+            x_column,
+            y_column,
+        )
 
     def export_chart_gui(self):
         """Save the currently rendered Visualization-tab chart to an image file."""

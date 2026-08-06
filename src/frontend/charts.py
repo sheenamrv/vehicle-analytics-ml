@@ -23,6 +23,8 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3D projection)
 
+from src.frontend.chart_specs import get_chart_spec
+
 
 DEFAULT_CMAP = "viridis"
 
@@ -62,28 +64,29 @@ class ChartCanvas(FigureCanvasQTAgg):
             self.show_empty("Open a dataset to visualize it.")
             return
 
-        # Extension point: add chart types here and update both the frontend
-        # column filtering and validation contract in main_window.py.
-        if chart_type == "Histogram":
+        spec = get_chart_spec(chart_type)
+        renderer = spec.renderer if spec is not None else None
+
+        if renderer == "histogram":
             self._histogram(df, x_col, bins=bins, show_mean_line=show_mean_line,
                             show_median_line=show_median_line, cmap=cmap)
-        elif chart_type == "Scatter":
+        elif renderer == "scatter":
             self._scatter(df, x_col, y_col, label_col, cmap=cmap)
-        elif chart_type == "Line":
+        elif renderer == "line":
             self._line(df, x_col, y_col, show_median_line=show_median_line)
-        elif chart_type == "Box Plot":
+        elif renderer == "box_plot":
             self._box_plot(df, x_col, label_col=label_col, show_median_line=show_median_line)
-        elif chart_type == "Bar Chart":
+        elif renderer == "bar_chart":
             self._bar_chart(df, x_col, y_col)
-        elif chart_type == "Grouped Box Plot":
+        elif renderer == "grouped_box_plot":
             self._grouped_box_plot(df, x_col, y_col)
-        elif chart_type == "Class Separation":
+        elif renderer == "class_separation":
             self._class_separation(df, x_col, y_col, label_col, cmap=cmap)
-        elif chart_type == "3D Scatter":
+        elif renderer == "scatter_3d":
             self._scatter_3d(df, x_col, y_col, z_col, label_col, cmap=cmap)
-        elif chart_type == "Time Series (All Signals)":
+        elif renderer == "time_series":
             self._time_series(df, extra_cols)
-        elif chart_type == "Feature Distribution Comparison":
+        elif renderer == "distribution_comparison":
             self._distribution_comparison(df, extra_cols)
         else:
             self.show_empty("Choose a chart type.")
@@ -661,4 +664,3 @@ class ChartCanvas(FigureCanvasQTAgg):
         if n <= 1:
             return [cmap_obj(0.5)]
         return [cmap_obj(i / max(n - 1, 1)) for i in range(n)]
-
