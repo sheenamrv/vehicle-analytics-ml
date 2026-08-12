@@ -91,7 +91,10 @@ python run.py
 Once the application has been tested and is working correctly, build the executable using:
 
 ```bash
-pyinstaller --onedir --windowed run.py
+pyinstaller run.spec
 ```
 
-If you choose to build the application make sure the venv is activated. One built it will appear in the following folder; dist/run with the exe file included.
+If you choose to build the application, make sure the venv is activated. The
+Windows build will appear under `dist/Classify & Learn Lab` with the application
+name and icon embedded in the executable. Windows shortcuts created from that
+executable will use the same icon.
