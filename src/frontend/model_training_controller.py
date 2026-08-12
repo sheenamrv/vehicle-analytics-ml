@@ -84,11 +84,14 @@ class ModelTrainingControllerMixin:
                     == str(self.project.get("label_column", "") or "").strip()
                 )
                 and (
-                    not model.get("feature_columns")
+                    not (model.get("input_feature_columns") or model.get("feature_columns"))
                     or self.working_df.empty
                     or all(
                         str(col) in self.working_df.columns
-                        for col in model.get("feature_columns", [])
+                        for col in (
+                            model.get("input_feature_columns")
+                            or model.get("feature_columns", [])
+                        )
                     )
                 )
             )
@@ -107,8 +110,15 @@ class ModelTrainingControllerMixin:
                 if str(metadata.get("category", "")).strip().lower() != "supervised":
                     continue
                 feature_columns = [str(col) for col in metadata.get("feature_columns", []) or []]
-                if feature_columns and not self.working_df.empty and any(
-                    col not in self.working_df.columns for col in feature_columns
+                input_feature_columns = [
+                    str(col)
+                    for col in (
+                        metadata.get("input_feature_columns")
+                        or feature_columns
+                    )
+                ]
+                if input_feature_columns and not self.working_df.empty and any(
+                    col not in self.working_df.columns for col in input_feature_columns
                 ):
                     continue
                 model_label = str(metadata.get("label", "")).strip()
@@ -307,6 +317,14 @@ class ModelTrainingControllerMixin:
                 "advanced_parameters": advanced_parameters,
                 "training_parameters": {**required_parameters, **advanced_parameters},
                 "feature_columns": saved.get("feature_columns", entry.get("feature_columns", [])),
+                "input_feature_columns": saved.get(
+                    "input_feature_columns",
+                    entry.get("input_feature_columns", []),
+                ),
+                "preprocessing": saved.get(
+                    "preprocessing",
+                    entry.get("preprocessing", {}),
+                ),
                 "metrics": saved.get("metrics", entry.get("metrics", {})),
                 "confusion_matrix": evaluation.get("confusion_matrix"),
                 "confusion_labels": evaluation.get("confusion_labels"),
@@ -345,7 +363,6 @@ class ModelTrainingControllerMixin:
                 return
             try:
                 # Export one self-contained PKL package
-                # The fitted estimator, model metadata, metrics, SSL progress, clustering results and parameters
                 package = create_model_package(
                     saved,
                     added_entry=entry,
@@ -491,6 +508,8 @@ class ModelTrainingControllerMixin:
             "parameters": payload["parameters"],
             "metrics": payload.get("metrics", {}),
             "feature_columns": payload.get("feature_columns", []),
+            "input_feature_columns": payload.get("input_feature_columns", []),
+            "preprocessing": payload.get("preprocessing", {}),
             "evaluation": snapshot,
         })
 
@@ -498,6 +517,8 @@ class ModelTrainingControllerMixin:
         if entry is not None:
             entry["trained"] = True
             entry["feature_columns"] = payload.get("feature_columns", [])
+            entry["input_feature_columns"] = payload.get("input_feature_columns", [])
+            entry["preprocessing"] = payload.get("preprocessing", {})
             entry["metrics"] = payload.get("metrics", {})
             entry["evaluation"] = snapshot
 
@@ -562,7 +583,7 @@ class ModelTrainingControllerMixin:
             self.show_error("Import Error", error)
             return
 
-        # New exports are self-contained PKL packages
+        # Exports are self-contained PKL packages
         imported, package_metadata, _ = unpack_model_package(imported_payload)
         if imported is None:
             QMessageBox.warning(self, "Import Error", "The PKL did not contain a model estimator.")
@@ -571,6 +592,8 @@ class ModelTrainingControllerMixin:
         saved_metrics = package_metadata.get("metrics", {}) or {}
         saved_parameters = package_metadata.get("parameters", {}) or {}
         saved_features = package_metadata.get("feature_columns", []) or []
+        saved_input_features = package_metadata.get("input_feature_columns", []) or []
+        saved_preprocessing = package_metadata.get("preprocessing", {}) or {}
         saved_evaluation = package_metadata.get("evaluation", {}) or {}
         saved_evaluation["metrics"] = saved_evaluation.get("metrics") or saved_metrics
         saved_common = package_metadata.get("common_parameters", {}) or {}
@@ -604,6 +627,10 @@ class ModelTrainingControllerMixin:
         if saved_features:
             feature_columns = [str(col) for col in saved_features]
         entry["feature_columns"] = feature_columns
+        entry["input_feature_columns"] = [
+            str(col) for col in (saved_input_features or feature_columns)
+        ]
+        entry["preprocessing"] = saved_preprocessing
         entry["metrics"] = saved_metrics
         saved_evaluation["metrics"] = saved_evaluation.get("metrics") or saved_metrics
         entry["evaluation"] = saved_evaluation
@@ -614,8 +641,9 @@ class ModelTrainingControllerMixin:
         if saved_advanced:
             entry["advanced_parameters"] = saved_advanced
         editable = bool(category and algorithm and self.project.get("label_column"))
-        if editable and feature_columns and not self.working_df.empty:
-            editable = all(column in self.working_df.columns for column in feature_columns)
+        editable_features = entry.get("input_feature_columns") or feature_columns
+        if editable and editable_features and not self.working_df.empty:
+            editable = all(column in self.working_df.columns for column in editable_features)
         entry["editable_external"] = editable
 
         self.project.setdefault("added_models", []).append(entry)
@@ -628,6 +656,8 @@ class ModelTrainingControllerMixin:
             "parameters": saved_parameters,
             "metrics": saved_metrics,
             "feature_columns": feature_columns,
+            "input_feature_columns": entry.get("input_feature_columns", []),
+            "preprocessing": saved_preprocessing,
             "evaluation": saved_evaluation,
         })
 

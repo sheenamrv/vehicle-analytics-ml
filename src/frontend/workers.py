@@ -228,7 +228,19 @@ class UnifiedModelTrainingWorker(QRunnable):
                     "result": result,
                     "trained_model": result["model"],
                     "metrics": result.get("metrics", {}),
+                    # Save model-facing columns after shared training preparation
                     "feature_columns": result.get("features", []),
+                    # Save raw dataset columns so Tab 4 can rebuild model input
+                    "input_feature_columns": [
+                        str(column)
+                        for column in self.dataframe.columns
+                        if str(column) != str(self.label_column)
+                    ],
+                    "preprocessing": {
+                        "prepare_training_features": True,
+                        "fill_method": "median",
+                        "fill_value": None,
+                    },
                     "parameters": parameters,
                 }
             elif category == "semi_supervised":

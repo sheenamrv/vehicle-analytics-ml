@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any, Optional
 import pandas as pd
 
+from src.data.process import unpack_model_package
+from src.model.model_utils import align_features, prepare_training_features
+
 @dataclass(frozen=True)
 class PredictionResult:
     label: str
@@ -23,6 +26,7 @@ class PlaybackAnnotationManager:
         self.current_row = 0
         self.model: Any = None
         self.model_path: Optional[str] = None
+        self.model_metadata: dict[str, Any] = {}
         self.prediction_dataset = pd.DataFrame()
         self.max_stream_rows = max(100, int(max_stream_rows))
 
@@ -88,6 +92,7 @@ class PlaybackAnnotationManager:
         return [col for col in self.dataset.select_dtypes(include="number").columns if str(col) != str(label_col)]
 
     def load_model(self, path: str | Path) -> Any:
+        """Load a model package exported by this application."""
         path = Path(path)
         try:
             import joblib
@@ -95,61 +100,177 @@ class PlaybackAnnotationManager:
         except Exception:
             with path.open("rb") as handle:
                 loaded = pickle.load(handle)
-        self.model = loaded.get("pipeline", loaded) if isinstance(loaded, dict) else loaded
-        if not hasattr(self.model, "predict"):
-            raise TypeError("The selected artifact does not provide a predict() method.")
-        self.model_path = str(path)
-        return self.model
 
-    def set_model(self, model: Any, model_name: str | None = None) -> Any:
+        model, metadata, is_package = unpack_model_package(loaded)
+        if not is_package or model is None:
+            raise ValueError(
+                "This file is not a supported application model package. "
+                "Export the model from the Models tab before loading it in Tab 4."
+            )
+
+        return self.set_model(model, model_name=str(path), metadata=metadata)
+
+    def set_model(
+        self,
+        model: Any,
+        model_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Any:
         if model is not None and not hasattr(model, "predict"):
-            raise TypeError("Model must provide a predict() method.")
+            raise TypeError(
+                "The selected model does not provide predict(). "
+                "Tab 4 can only classify new samples with estimators that "
+                "support prediction on unseen data."
+            )
         self.model = model
         self.model_path = model_name
+        self.model_metadata = dict(metadata or {})
+        self.prediction_dataset = pd.DataFrame()
         return self.model
 
-    def model_feature_names(self) -> list[str]:
-        if self.model is None:
+    @staticmethod
+    def _estimator_feature_names(model: Any) -> list[str]:
+        if model is None:
             return []
 
-        names = getattr(self.model, "feature_names_in_", None)
+        names = getattr(model, "feature_names_in_", None)
         if names is not None:
             return [str(name) for name in names]
 
-        # Some saved artifacts are sklearn Pipelines. The pipeline or its
-        # first fitted step may retain the original input feature names.
-        named_steps = getattr(self.model, "named_steps", None)
+        named_steps = getattr(model, "named_steps", None)
         if named_steps:
             for step in named_steps.values():
                 names = getattr(step, "feature_names_in_", None)
                 if names is not None:
                     return [str(name) for name in names]
-
         return []
 
-    def predict_current(self, label_col: str | None = None, feature_columns: list[str] | None = None) -> PredictionResult:
+    def model_feature_names(self) -> list[str]:
+        """Return the fitted model feature order."""
+        saved = self.model_metadata.get("feature_columns") or []
+        if saved:
+            return [str(name) for name in saved]
+        return self._estimator_feature_names(self.model)
+
+    def model_input_feature_names(self) -> list[str]:
+        """Return raw dataset columns expected before preprocessing."""
+        saved = self.model_metadata.get("input_feature_columns") or []
+        if saved:
+            return [str(name) for name in saved]
+        return self.model_feature_names()
+
+    def _resolve_input_features(
+        self,
+        frame: pd.DataFrame,
+        selected_features: list[str] | None,
+        label_col: str | None = None,
+    ) -> list[str]:
+        expected_input = self.model_input_feature_names()
+        package_version = self.model_metadata.get("package_version")
+        if expected_input:
+            missing_expected = [
+                column for column in expected_input if column not in frame.columns
+            ]
+            if not missing_expected:
+                return expected_input
+            # Version 2 distinguishes raw input columns from fitted columns
+            if package_version is not None and int(package_version) >= 2:
+                raise ValueError(
+                    "Missing model input features: " + ", ".join(missing_expected)
+                )
+
+        selected = [str(column) for column in (selected_features or [])]
+        if selected:
+            return selected
+
+        excluded = {str(label_col)} if label_col else set()
+        return [str(column) for column in frame.columns if str(column) not in excluded]
+
+    def _prepare_model_features(
+        self,
+        frame: pd.DataFrame,
+        selected_features: list[str] | None,
+        label_col: str | None = None,
+    ) -> pd.DataFrame:
+        if frame is None or frame.empty:
+            raise ValueError("No model input rows are available.")
+
+        input_features = self._resolve_input_features(
+            frame, selected_features, label_col=label_col
+        )
+        if not input_features:
+            raise ValueError("Select the model feature columns used during training.")
+
+        missing = [column for column in input_features if column not in frame.columns]
+        if missing:
+            raise ValueError("Missing model features: " + ", ".join(missing))
+
+        raw = frame.loc[:, input_features].copy()
+        expected_model_features = self.model_feature_names()
+        category = str(self.model_metadata.get("category", "")).strip().lower()
+        preprocessing = dict(self.model_metadata.get("preprocessing", {}) or {})
+
+        # Recreate the shared training preprocessing for application models
+        app_preprocess = bool(preprocessing.get("prepare_training_features"))
+        if app_preprocess and category != "semi_supervised" and not hasattr(self.model, "features"):
+            prepared = prepare_training_features(
+                raw,
+                features=input_features,
+                fill_method=preprocessing.get("fill_method", "median"),
+                fill_value=preprocessing.get("fill_value"),
+            )
+            if expected_model_features:
+                prepared = align_features(prepared, expected_model_features, fill_value=0)
+            return prepared
+
+        # Reorder numeric inputs to the saved fitted feature order
+        if expected_model_features and all(
+            column in raw.columns for column in expected_model_features
+        ):
+            raw = raw.loc[:, expected_model_features]
+        elif expected_model_features and not app_preprocess:
+            raise ValueError(
+                "This model package does not contain the preprocessing metadata "
+                "needed to rebuild its fitted feature columns. Retrain or export "
+                "the model with the current application version."
+            )
+
+        if raw.isna().any().any():
+            counts = raw.isna().sum()
+            affected = [
+                f"{column} ({int(count)})"
+                for column, count in counts.items()
+                if count
+            ]
+            raise ValueError(
+                "Prediction features contain missing values: " + ", ".join(affected)
+            )
+
+        return raw
+
+    def predict_current(
+        self,
+        label_col: str | None = None,
+        feature_columns: list[str] | None = None,
+    ) -> PredictionResult:
         sample = self.current_sample()
         if sample.empty:
             return PredictionResult("no sample", error="No sample is available.")
         if self.model is None:
             if label_col and label_col in sample.columns:
                 return PredictionResult(str(sample.iloc[0][label_col]))
-            return PredictionResult("model not loaded", error="Load a pretrained model to classify samples.")
+            return PredictionResult(
+                "model not loaded",
+                error="Load a pretrained model to classify samples.",
+            )
         try:
-            if feature_columns:
-                missing = [column for column in feature_columns if column not in sample.columns]
-                if missing:
-                    raise ValueError("Missing model features: " + ", ".join(missing))
-                features = sample[feature_columns].copy()
-            else:
-                features = sample.drop(columns=[label_col], errors="ignore") if label_col else sample.copy()
-            numeric_features = features.select_dtypes(include="number")
-            if numeric_features.empty:
-                raise ValueError("No numeric model features are available.")
-            label = str(self.model.predict(numeric_features)[0])
+            features = self._prepare_model_features(
+                sample, feature_columns, label_col=label_col
+            )
+            label = str(self.model.predict(features)[0])
             confidence = None
             if hasattr(self.model, "predict_proba"):
-                probabilities = self.model.predict_proba(numeric_features)
+                probabilities = self.model.predict_proba(features)
                 confidence = float(max(probabilities[0]))
             return PredictionResult(label=label, confidence=confidence)
         except Exception as error:
@@ -168,34 +289,10 @@ class PlaybackAnnotationManager:
             raise ValueError("No dataset is available for prediction.")
         if self.model is None:
             raise ValueError("Load a pretrained model before predicting the dataset.")
-        if not feature_columns:
-            raise ValueError("Select the model feature columns used during training.")
 
-        missing = [column for column in feature_columns if column not in self.dataset.columns]
-        if missing:
-            raise ValueError("Missing model features: " + ", ".join(missing))
-
-        features = self.dataset.loc[:, feature_columns].copy()
-        non_numeric = [
-            column for column in features.columns
-            if not pd.api.types.is_numeric_dtype(features[column])
-        ]
-        if non_numeric:
-            raise ValueError(
-                "The current exported model expects numeric input. "
-                "These selected columns are not numeric: " + ", ".join(non_numeric)
-            )
-        if features.isna().any().any():
-            missing_counts = features.isna().sum()
-            affected = [
-                f"{column} ({int(count)})"
-                for column, count in missing_counts.items()
-                if count
-            ]
-            raise ValueError(
-                "Prediction features contain missing values: " + ", ".join(affected)
-            )
-
+        features = self._prepare_model_features(
+            self.dataset, feature_columns, label_col=None
+        )
         predictions = self.model.predict(features)
         if len(predictions) != len(self.dataset):
             raise ValueError("The model returned an unexpected number of predictions.")

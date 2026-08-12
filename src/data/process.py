@@ -13,13 +13,44 @@ MODEL_PACKAGE_MARKER = "vehicle_analytics_ml_model_package"
 MODEL_PACKAGE_VERSION = 1
 
 
+def _model_feature_names(model):
+    """Extraction of fitted input feature names from estimators/pipelines."""
+    if model is None:
+        return []
+
+    names = getattr(model, "feature_names_in_", None)
+    if names is not None:
+        return [str(name) for name in names]
+
+    named_steps = getattr(model, "named_steps", None)
+    if named_steps:
+        for step in named_steps.values():
+            names = getattr(step, "feature_names_in_", None)
+            if names is not None:
+                return [str(name) for name in names]
+
+    return []
+
+
+def _prefer_metadata_value(*values, default=None):
+    """Return the first useful metadata value without letting empty values erase data."""
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if isinstance(value, (list, tuple, dict, set)) and not value:
+            continue
+        return value
+    return default
+
+
 def create_model_package(model_info, added_entry=None, label=None):
     """Create one self-contained PKL payload for a trained model."""
     model_info = dict(model_info or {})
     added_entry = dict(added_entry or {})
     evaluation = dict(model_info.get("evaluation", {}) or {})
 
-    # Preserve result values that may exist at the top level in older records
     for key in (
         "confusion_matrix",
         "confusion_labels",
@@ -38,130 +69,139 @@ def create_model_package(model_info, added_entry=None, label=None):
         if key in model_info and key not in evaluation:
             evaluation[key] = model_info.get(key)
 
-    metrics = (
-        model_info.get("metrics")
-        or evaluation.get("metrics")
-        or {}
-    )
+    metrics = model_info.get("metrics") or evaluation.get("metrics") or {}
     evaluation.setdefault("metrics", metrics)
 
     resolved_label = (
         label
         if label is not None
-        else model_info.get(
-            "label",
-            added_entry.get("label", ""),
+        else _prefer_metadata_value(
+            model_info.get("label"),
+            added_entry.get("label"),
+            default="",
         )
+    )
+
+    model = model_info.get("model")
+    fitted_names = _model_feature_names(model)
+    feature_columns = list(
+        _prefer_metadata_value(
+            model_info.get("feature_columns"),
+            added_entry.get("feature_columns"),
+            fitted_names,
+            default=[],
+        )
+        or []
+    )
+    input_feature_columns = list(
+        _prefer_metadata_value(
+            model_info.get("input_feature_columns"),
+            added_entry.get("input_feature_columns"),
+            model_info.get("source_feature_columns"),
+            added_entry.get("source_feature_columns"),
+            # Use model-facing features as the fallback input list
+            feature_columns,
+            default=[],
+        )
+        or []
+    )
+
+    preprocessing = dict(
+        _prefer_metadata_value(
+            model_info.get("preprocessing_metadata"),
+            model_info.get("preprocessing"),
+            added_entry.get("preprocessing_metadata"),
+            added_entry.get("preprocessing"),
+            default={},
+        )
+        or {}
     )
 
     return {
         "package_type": MODEL_PACKAGE_MARKER,
         "package_version": MODEL_PACKAGE_VERSION,
-        "model": model_info.get("model"),
-        "display_name": model_info.get(
-            "display_name",
-            added_entry.get("name", ""),
+        "model": model,
+        "display_name": _prefer_metadata_value(
+            model_info.get("display_name"),
+            added_entry.get("name"),
+            default="",
         ),
-        "category": model_info.get(
-            "category",
-            added_entry.get("category", ""),
+        "category": _prefer_metadata_value(
+            model_info.get("category"),
+            added_entry.get("category"),
+            default="",
         ),
-        "algorithm": model_info.get(
-            "algorithm",
-            added_entry.get("algorithm", ""),
+        "algorithm": _prefer_metadata_value(
+            model_info.get("algorithm"),
+            added_entry.get("algorithm"),
+            default="",
         ),
         "label": resolved_label or "",
-        "feature_columns": list(
-            model_info.get(
-                "feature_columns",
-                added_entry.get("feature_columns", []),
-            )
-            or []
-        ),
+        "feature_columns": feature_columns,
+        "input_feature_columns": input_feature_columns,
+        "preprocessing": preprocessing,
         "parameters": model_info.get("parameters", {}) or {},
-        "common_parameters": (
-            model_info.get("common_parameters")
-            or added_entry.get("common_parameters")
-            or {}
-        ),
-        "required_parameters": (
-            model_info.get("required_parameters")
-            or added_entry.get("required_parameters")
-            or {}
-        ),
-        "advanced_parameters": (
-            model_info.get("advanced_parameters")
-            or added_entry.get("advanced_parameters")
-            or {}
-        ),
+        "common_parameters": model_info.get("common_parameters") or added_entry.get("common_parameters") or {},
+        "required_parameters": model_info.get("required_parameters") or added_entry.get("required_parameters") or {},
+        "advanced_parameters": model_info.get("advanced_parameters") or added_entry.get("advanced_parameters") or {},
         "metrics": metrics,
         "evaluation": evaluation,
     }
 
 
 def unpack_model_package(payload):
-    """Return ``(model, metadata, is_package)`` for new and legacy PKLs."""
+    """Return ``(model, metadata, is_package)`` for application model packages."""
 
-    # Legacy estimator-only PKL
     if not isinstance(payload, dict):
-        return payload, {}, False
+        return None, {}, False
+
+    if payload.get("package_type") != MODEL_PACKAGE_MARKER:
+        return None, {}, False
 
     model = payload.get("model")
-
     if model is None:
-        model = payload.get("estimator")
-
-    if model is None:
-        model = payload.get("trained_model")
-
-    if model is None:
-        return None, dict(payload), False
+        return None, dict(payload), True
 
     evaluation = dict(payload.get("evaluation", {}) or {})
-
     for key in (
-        "confusion_matrix",
-        "confusion_labels",
-        "cluster_summary",
-        "ssl_progress",
-        "ssl_iteration_progress",
-        "ssl_export_data",
-        "clustered_export_data",
-        "predictions",
-        "y_true",
-        "y_score",
-        "labels",
-        "transduction",
-        "labeled_iter",
+        "confusion_matrix", "confusion_labels", "cluster_summary",
+        "ssl_progress", "ssl_iteration_progress", "ssl_export_data",
+        "clustered_export_data", "predictions", "y_true", "y_score",
+        "labels", "transduction", "labeled_iter",
     ):
         if key in payload and key not in evaluation:
             evaluation[key] = payload.get(key)
 
-    metrics = (
-        payload.get("metrics")
-        or evaluation.get("metrics")
-        or {}
-    )
+    metrics = payload.get("metrics") or evaluation.get("metrics") or {}
     evaluation.setdefault("metrics", metrics)
 
+    fitted_names = _model_feature_names(model)
+    feature_columns = list(
+        _prefer_metadata_value(
+            payload.get("feature_columns"),
+            fitted_names,
+            default=[],
+        )
+        or []
+    )
+    input_feature_columns = list(
+        _prefer_metadata_value(
+            payload.get("input_feature_columns"),
+            payload.get("source_feature_columns"),
+            feature_columns,
+            default=[],
+        )
+        or []
+    )
+
     metadata = {
-        "display_name": payload.get(
-            "display_name",
-            payload.get("name", ""),
-        ),
+        "display_name": _prefer_metadata_value(payload.get("display_name"), payload.get("name"), default=""),
         "category": payload.get("category", ""),
         "algorithm": payload.get("algorithm", ""),
-        "label": payload.get(
-            "label",
-            payload.get("label_column", ""),
-        ),
-        "feature_columns": list(
-            payload.get(
-                "feature_columns",
-                payload.get("features", []),
-            )
-            or []
-        ),
+        "label": _prefer_metadata_value(payload.get("label"), payload.get("label_column"), default=""),
+        "feature_columns": feature_columns,
+        "input_feature_columns": input_feature_columns,
+        "preprocessing": dict(payload.get("preprocessing", {}) or {}),
         "parameters": payload.get("parameters", {}) or {},
         "common_parameters": payload.get("common_parameters", {}) or {},
         "required_parameters": payload.get("required_parameters", {}) or {},
@@ -171,9 +211,7 @@ def unpack_model_package(payload):
         "package_version": payload.get("package_version"),
     }
 
-    is_package = payload.get("package_type") == MODEL_PACKAGE_MARKER
-
-    return model, metadata, is_package
+    return model, metadata, True
 
 
 def make_json_safe(value):
@@ -515,7 +553,7 @@ def save_checkpoint(project_dir, checkpoint_name, obj, project):
 
 
 def load_project(icp_path):
-    """Load projects created by both the new and original save formats."""
+    """Load an ICP project and restore packaged model metadata."""
     icp_path = Path(icp_path)
 
     if not icp_path.exists():
@@ -572,7 +610,7 @@ def load_project(icp_path):
 
             model_info["model"] = loaded_model
 
-            # New project archives keep all model metadata in the PKL package
+            # Read model metadata from the PKL package
             metadata = package_metadata
             metadata_file = model_info.get("metadata_file")
 
@@ -584,8 +622,12 @@ def load_project(icp_path):
                 ) as file:
                     legacy_metadata = json.load(file)
 
-                # New package metadata
-                metadata = {**legacy_metadata, **metadata}
+                # Keep useful sidecar metadata when package values are empty
+                merged_metadata = dict(legacy_metadata)
+                for key, value in metadata.items():
+                    if _prefer_metadata_value(value, default=None) is not None:
+                        merged_metadata[key] = value
+                metadata = merged_metadata
 
             defaults = {
                 "display_name": "",
@@ -593,6 +635,8 @@ def load_project(icp_path):
                 "category": "",
                 "label": project.get("label_column", ""),
                 "feature_columns": [],
+                "input_feature_columns": [],
+                "preprocessing": {},
                 "parameters": {},
                 "common_parameters": {},
                 "required_parameters": {},
@@ -603,10 +647,31 @@ def load_project(icp_path):
             }
 
             for key, default in defaults.items():
-                model_info[key] = metadata.get(
-                    key,
-                    model_info.get(key, default),
+                # Keep useful project metadata when package values are empty
+                model_info[key] = _prefer_metadata_value(
+                    metadata.get(key),
+                    model_info.get(key),
+                    default=default,
                 )
+
+            # Reconcile the Added Models table with the restored trained model
+            display_name = str(model_info.get("display_name", "")).strip()
+            if display_name:
+                for added in project.get("added_models", []):
+                    if str(added.get("name", "")).strip() != display_name:
+                        continue
+                    added["trained"] = True
+                    for key in (
+                        "feature_columns",
+                        "input_feature_columns",
+                        "preprocessing",
+                        "metrics",
+                        "evaluation",
+                    ):
+                        value = model_info.get(key)
+                        if value not in (None, "", [], {}):
+                            added[key] = value
+                    break
 
         try:
             original_path = temp_dir / "original_data.pkl"
