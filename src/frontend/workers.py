@@ -142,46 +142,35 @@ class UnifiedModelTrainingWorker(QRunnable):
         self.signals = WorkerSignals()
 
     @staticmethod
-    def _build_ssl_training_frame(
-        dataframe,
-        label_column,
-        hide_percent,
-        random_state,
-    ):
+    def _prepare_ssl_training_frame(dataframe, label_column):
         frame = dataframe.copy()
-        if frame.empty or label_column not in frame.columns:
-            return frame
+        if frame.empty or not label_column or label_column not in frame.columns:
+            raise ValueError(
+                "Semi-supervised training requires a dataset with a valid label column."
+            )
 
-        hide_percent = float(hide_percent)
-        if hide_percent <= 0:
-            return frame
+        labels = frame[label_column]
+        missing_mask = labels.isna()
+        try:
+            blank_mask = labels.astype("string").str.strip().eq("").fillna(False)
+            if bool(blank_mask.any()):
+                frame.loc[blank_mask, label_column] = np.nan
+                missing_mask = missing_mask | blank_mask
+        except Exception:
+            pass
 
-        labeled = frame[frame[label_column].notna()].copy()
-        if labeled.empty:
-            return frame
+        labeled_count = int((~missing_mask).sum())
+        missing_count = int(missing_mask.sum())
 
-        class_to_indices = {
-            value: list(group.index)
-            for value, group in labeled.groupby(label_column, dropna=True)
-        }
-        if len(class_to_indices) < 2:
-            return frame
+        if labeled_count == 0:
+            raise ValueError(
+                "Semi-supervised training requires at least one known label."
+            )
+        if missing_count == 0:
+            raise ValueError(
+                "Semi-supervised training requires at least one missing label."
+            )
 
-        rng = np.random.default_rng(int(random_state))
-        hide_indices = []
-        for _label_value, indexes in class_to_indices.items():
-            if len(indexes) <= 1:
-                continue
-            requested = int(np.floor(len(indexes) * hide_percent / 100.0))
-            max_allowed = len(indexes) - 1
-            hide_count = min(max_allowed, max(0, requested))
-            if hide_count <= 0:
-                continue
-            chosen = rng.choice(indexes, size=hide_count, replace=False)
-            hide_indices.extend(chosen.tolist())
-
-        if hide_indices:
-            frame.loc[hide_indices, label_column] = np.nan
         return frame
 
     @staticmethod
@@ -228,14 +217,23 @@ class UnifiedModelTrainingWorker(QRunnable):
                     "result": result,
                     "trained_model": result["model"],
                     "metrics": result.get("metrics", {}),
+                    # Save model-facing columns after shared training preparation
                     "feature_columns": result.get("features", []),
+                    # Save raw dataset columns so Tab 4 can rebuild model input
+                    "input_feature_columns": [
+                        str(column)
+                        for column in self.dataframe.columns
+                        if str(column) != str(self.label_column)
+                    ],
+                    "preprocessing": {
+                        "prepare_training_features": True,
+                        "fill_method": "median",
+                        "fill_value": None,
+                    },
                     "parameters": parameters,
                 }
             elif category == "semi_supervised":
                 base_token = parameters.get("base_model_name", "")
-                hide_labeled_percent = float(
-                    parameters.pop("hide_labeled_percent", 30.0)
-                )
                 base_source, base_reference = self._resolve_base_model_reference(
                     base_token
                 )
@@ -356,11 +354,9 @@ class UnifiedModelTrainingWorker(QRunnable):
                         "supervised model, or exported supervised PKL model."
                     )
 
-                ssl_train_df = self._build_ssl_training_frame(
+                ssl_train_df = self._prepare_ssl_training_frame(
                     dataframe=self.dataframe,
                     label_column=self.label_column,
-                    hide_percent=hide_labeled_percent,
-                    random_state=int(common.get("random_state", 42)),
                 )
 
                 result = run_ssl_workflow(
@@ -385,7 +381,6 @@ class UnifiedModelTrainingWorker(QRunnable):
                         False,
                     )
                 )
-                parameters["hide_labeled_percent"] = hide_labeled_percent
                 payload = {
                     "name": self.added_model_entry["name"],
                     "category": category,

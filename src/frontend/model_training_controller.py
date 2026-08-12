@@ -56,6 +56,54 @@ class ModelTrainingControllerMixin:
         del index
         self.refresh_model_page()
 
+    def on_model_category_selected(self, category):
+        if str(category).strip().lower() != "semi_supervised":
+            return
+
+        if self.project is None or self.working_df is None or self.working_df.empty:
+            QMessageBox.warning(
+                self,
+                "Semi-Supervised Dataset",
+                "Import a dataset before configuring a semi-supervised model.",
+            )
+            return
+
+        label = str(self.project.get("label_column", "") or "").strip()
+        if not label or label not in self.working_df.columns:
+            QMessageBox.warning(
+                self,
+                "Semi-Supervised Dataset",
+                "Select a valid label column before configuring a semi-supervised model.",
+            )
+            return
+
+        labels = self.working_df[label]
+        missing_mask = labels.isna()
+        try:
+            blank_mask = labels.astype("string").str.strip().eq("").fillna(False)
+            missing_mask = missing_mask | blank_mask
+        except Exception:
+            pass
+
+        missing_count = int(missing_mask.sum())
+        labeled_count = int((~missing_mask).sum())
+
+        if labeled_count == 0:
+            QMessageBox.warning(
+                self,
+                "Semi-Supervised Dataset",
+                f"The label column '{label}' has no known labels. Semi-supervised training needs both labeled and unlabeled rows.",
+            )
+            return
+
+        if missing_count == 0:
+            QMessageBox.warning(
+                self,
+                "Semi-Supervised Dataset",
+                f"The label column '{label}' has no missing labels. Semi-supervised training requires both labeled and unlabeled rows. Add missing values to the label column before adding or training this model.",
+            )
+            return
+
     def refresh_model_page(self):
         """Synchronize Added Models and Queue using project-backed state."""
         if self.project is None:
@@ -84,11 +132,14 @@ class ModelTrainingControllerMixin:
                     == str(self.project.get("label_column", "") or "").strip()
                 )
                 and (
-                    not model.get("feature_columns")
+                    not (model.get("input_feature_columns") or model.get("feature_columns"))
                     or self.working_df.empty
                     or all(
                         str(col) in self.working_df.columns
-                        for col in model.get("feature_columns", [])
+                        for col in (
+                            model.get("input_feature_columns")
+                            or model.get("feature_columns", [])
+                        )
                     )
                 )
             )
@@ -107,8 +158,15 @@ class ModelTrainingControllerMixin:
                 if str(metadata.get("category", "")).strip().lower() != "supervised":
                     continue
                 feature_columns = [str(col) for col in metadata.get("feature_columns", []) or []]
-                if feature_columns and not self.working_df.empty and any(
-                    col not in self.working_df.columns for col in feature_columns
+                input_feature_columns = [
+                    str(col)
+                    for col in (
+                        metadata.get("input_feature_columns")
+                        or feature_columns
+                    )
+                ]
+                if input_feature_columns and not self.working_df.empty and any(
+                    col not in self.working_df.columns for col in input_feature_columns
                 ):
                     continue
                 model_label = str(metadata.get("label", "")).strip()
@@ -133,6 +191,44 @@ class ModelTrainingControllerMixin:
             return
 
         ModelController.ensure_project_state(self.project)
+
+        if str(payload.get("category", "")).strip().lower() == "semi_supervised":
+            label = str(self.project.get("label_column", "") or "").strip()
+            if self.working_df is None or self.working_df.empty or not label or label not in self.working_df.columns:
+                QMessageBox.warning(
+                    self,
+                    "Semi-Supervised Dataset",
+                    "Semi-supervised models require a dataset with a valid label column.",
+                )
+                return
+
+            labels = self.working_df[label]
+            missing_mask = labels.isna()
+            try:
+                blank_mask = labels.astype("string").str.strip().eq("").fillna(False)
+                missing_mask = missing_mask | blank_mask
+            except Exception:
+                pass
+
+            labeled_count = int((~missing_mask).sum())
+            missing_count = int(missing_mask.sum())
+
+            if labeled_count == 0:
+                QMessageBox.warning(
+                    self,
+                    "Semi-Supervised Dataset",
+                    f"The label column '{label}' needs at least one known label before a semi-supervised model can be added.",
+                )
+                return
+
+            if missing_count == 0:
+                QMessageBox.warning(
+                    self,
+                    "Semi-Supervised Dataset",
+                    f"The label column '{label}' needs at least one missing label before a semi-supervised model can be added.",
+                )
+                return
+
         added_models = self.project.setdefault("added_models", [])
         existing_names = [item.get("name", "") for item in added_models]
 
@@ -307,6 +403,14 @@ class ModelTrainingControllerMixin:
                 "advanced_parameters": advanced_parameters,
                 "training_parameters": {**required_parameters, **advanced_parameters},
                 "feature_columns": saved.get("feature_columns", entry.get("feature_columns", [])),
+                "input_feature_columns": saved.get(
+                    "input_feature_columns",
+                    entry.get("input_feature_columns", []),
+                ),
+                "preprocessing": saved.get(
+                    "preprocessing",
+                    entry.get("preprocessing", {}),
+                ),
                 "metrics": saved.get("metrics", entry.get("metrics", {})),
                 "confusion_matrix": evaluation.get("confusion_matrix"),
                 "confusion_labels": evaluation.get("confusion_labels"),
@@ -345,7 +449,6 @@ class ModelTrainingControllerMixin:
                 return
             try:
                 # Export one self-contained PKL package
-                # The fitted estimator, model metadata, metrics, SSL progress, clustering results and parameters
                 package = create_model_package(
                     saved,
                     added_entry=entry,
@@ -491,6 +594,8 @@ class ModelTrainingControllerMixin:
             "parameters": payload["parameters"],
             "metrics": payload.get("metrics", {}),
             "feature_columns": payload.get("feature_columns", []),
+            "input_feature_columns": payload.get("input_feature_columns", []),
+            "preprocessing": payload.get("preprocessing", {}),
             "evaluation": snapshot,
         })
 
@@ -498,6 +603,8 @@ class ModelTrainingControllerMixin:
         if entry is not None:
             entry["trained"] = True
             entry["feature_columns"] = payload.get("feature_columns", [])
+            entry["input_feature_columns"] = payload.get("input_feature_columns", [])
+            entry["preprocessing"] = payload.get("preprocessing", {})
             entry["metrics"] = payload.get("metrics", {})
             entry["evaluation"] = snapshot
 
@@ -562,7 +669,7 @@ class ModelTrainingControllerMixin:
             self.show_error("Import Error", error)
             return
 
-        # New exports are self-contained PKL packages
+        # Exports are self-contained PKL packages
         imported, package_metadata, _ = unpack_model_package(imported_payload)
         if imported is None:
             QMessageBox.warning(self, "Import Error", "The PKL did not contain a model estimator.")
@@ -571,6 +678,8 @@ class ModelTrainingControllerMixin:
         saved_metrics = package_metadata.get("metrics", {}) or {}
         saved_parameters = package_metadata.get("parameters", {}) or {}
         saved_features = package_metadata.get("feature_columns", []) or []
+        saved_input_features = package_metadata.get("input_feature_columns", []) or []
+        saved_preprocessing = package_metadata.get("preprocessing", {}) or {}
         saved_evaluation = package_metadata.get("evaluation", {}) or {}
         saved_evaluation["metrics"] = saved_evaluation.get("metrics") or saved_metrics
         saved_common = package_metadata.get("common_parameters", {}) or {}
@@ -604,6 +713,10 @@ class ModelTrainingControllerMixin:
         if saved_features:
             feature_columns = [str(col) for col in saved_features]
         entry["feature_columns"] = feature_columns
+        entry["input_feature_columns"] = [
+            str(col) for col in (saved_input_features or feature_columns)
+        ]
+        entry["preprocessing"] = saved_preprocessing
         entry["metrics"] = saved_metrics
         saved_evaluation["metrics"] = saved_evaluation.get("metrics") or saved_metrics
         entry["evaluation"] = saved_evaluation
@@ -614,8 +727,9 @@ class ModelTrainingControllerMixin:
         if saved_advanced:
             entry["advanced_parameters"] = saved_advanced
         editable = bool(category and algorithm and self.project.get("label_column"))
-        if editable and feature_columns and not self.working_df.empty:
-            editable = all(column in self.working_df.columns for column in feature_columns)
+        editable_features = entry.get("input_feature_columns") or feature_columns
+        if editable and editable_features and not self.working_df.empty:
+            editable = all(column in self.working_df.columns for column in editable_features)
         entry["editable_external"] = editable
 
         self.project.setdefault("added_models", []).append(entry)
@@ -628,6 +742,8 @@ class ModelTrainingControllerMixin:
             "parameters": saved_parameters,
             "metrics": saved_metrics,
             "feature_columns": feature_columns,
+            "input_feature_columns": entry.get("input_feature_columns", []),
+            "preprocessing": saved_preprocessing,
             "evaluation": saved_evaluation,
         })
 

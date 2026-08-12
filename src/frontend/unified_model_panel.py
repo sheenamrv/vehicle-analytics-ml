@@ -425,6 +425,7 @@ class AdvancedParametersDialog(QDialog):
 class UnifiedModelSidebar(QWidget):
     add_model_requested = Signal(dict)
     import_external_requested = Signal()
+    category_selected = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -446,9 +447,14 @@ class UnifiedModelSidebar(QWidget):
         layout.addSpacing(26)
         layout.addWidget(section_label("MODEL BUILDER"))
 
+        import_external = secondary_button("Import External PKL")
+        import_external.clicked.connect(self.import_external_requested.emit)
+        layout.addWidget(import_external)
+
         self.category_combo = taller_dropdown(QComboBox())
         self.category_combo.addItems(ModelController.category_options())
         self.category_combo.currentTextChanged.connect(self._on_category_changed)
+        self.category_combo.textActivated.connect(self.category_selected.emit)
         layout.addWidget(QLabel("Category"))
         layout.addWidget(self.category_combo)
 
@@ -499,9 +505,6 @@ class UnifiedModelSidebar(QWidget):
         clear_button = secondary_button("Clear Form")
         clear_button.clicked.connect(self.reset_form)
         layout.addWidget(clear_button)
-        import_external = secondary_button("Import External PKL")
-        import_external.clicked.connect(self.import_external_requested.emit)
-        layout.addWidget(import_external)
         layout.addStretch()
 
         self._on_category_changed(self.category_combo.currentText())

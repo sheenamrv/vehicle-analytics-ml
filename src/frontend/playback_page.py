@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QMessageBox,
     QProgressDialog,
     QScrollArea,
@@ -22,6 +23,7 @@ from src.frontend.playback_components import (
     SignalChartsPanel,
     VideoPlaybackPanel,
 )
+from src.data.process import load_project
 from src.frontend.playback_sidebar import PlaybackSidebar
 from src.frontend.table_model import PandasTableModel
 from src.playback_annotation.playback_annotation import PlaybackAnnotationManager
@@ -345,6 +347,7 @@ class PlaybackAnnotationPage(QWidget):
                 "Live UDP source selected. "
                 "Start the stream to receive samples."
             )
+            self.sidebar.predict_dataset_button.setEnabled(False)
 
             self.render_current_frame()
             return
@@ -416,6 +419,9 @@ class PlaybackAnnotationPage(QWidget):
         self.corrected_label_input.clear()
         self.annotation_note.clear()
 
+        self.sidebar.predict_dataset_button.setEnabled(
+            self.backend.model is not None and not df.empty
+        )
         self.render_current_frame()
 
     def upload_dataset(self):
@@ -536,6 +542,14 @@ class PlaybackAnnotationPage(QWidget):
         self.sidebar.set_columns(
             pd.DataFrame()
         )
+
+        # Return Tab 4 to Imported Dataset after loading an ICP
+        self.sidebar.source_combo.blockSignals(True)
+        self.sidebar.source_combo.setCurrentText("Imported Dataset")
+        self.sidebar.source_combo.blockSignals(False)
+        self.sidebar.set_udp_controls_visible(False)
+        self.sidebar.upload_dataset_button.setVisible(False)
+        self.sidebar.upload_dataset_button.setEnabled(False)
 
         if VIDEO_AVAILABLE:
             self.video_section.hide()
@@ -842,8 +856,10 @@ class PlaybackAnnotationPage(QWidget):
             "Load Pretrained Model",
             str(Path.home() / "Downloads"),
             (
-                "Pickle/Joblib Models "
-                "(*.pkl *.pickle *.joblib);;"
+                "Model / ICP Files "
+                "(*.pkl *.pickle *.joblib *.icp);;"
+                "Pickle/Joblib Models (*.pkl *.pickle *.joblib);;"
+                "ICP Project Files (*.icp);;"
                 "All Files (*.*)"
             ),
         )
@@ -851,8 +867,53 @@ class PlaybackAnnotationPage(QWidget):
         if not path:
             return
 
+        selected_name = Path(path).name
+
         try:
-            self.backend.load_model(path)
+            if Path(path).suffix.lower() == ".icp":
+                project, _og_df, _working_df, _feature_df = load_project(path)
+                candidates = [
+                    model_info
+                    for model_info in project.get("models", [])
+                    if model_info.get("model") is not None
+                    and hasattr(model_info.get("model"), "predict")
+                ]
+                if not candidates:
+                    raise ValueError(
+                        "This ICP project does not contain a trained model that "
+                        "supports predict() on new samples."
+                    )
+
+                if len(candidates) == 1:
+                    chosen = candidates[0]
+                else:
+                    names = [
+                        str(model.get("display_name") or f"Model {index + 1}")
+                        for index, model in enumerate(candidates)
+                    ]
+                    choice, accepted = QInputDialog.getItem(
+                        self,
+                        "Select ICP Model",
+                        "Choose a trained model from the project:",
+                        names,
+                        0,
+                        False,
+                    )
+                    if not accepted:
+                        return
+                    chosen = candidates[names.index(choice)]
+
+                selected_name = (
+                    f"{Path(path).name} — "
+                    f"{chosen.get('display_name', 'model')}"
+                )
+                self.backend.set_model(
+                    chosen.get("model"),
+                    model_name=selected_name,
+                    metadata=chosen,
+                )
+            else:
+                self.backend.load_model(path)
         except Exception as error:
             QMessageBox.critical(
                 self,
@@ -861,21 +922,20 @@ class PlaybackAnnotationPage(QWidget):
             )
             return
 
-        expected_features = self.backend.model_feature_names()
-        available_features = set(
-            self.sidebar.feature_picker.checkboxes
-        )
+        # Prefer raw dataset inputs saved with the model package
+        expected_inputs = self.backend.model_input_feature_names()
+        available_features = set(self.sidebar.feature_picker.checkboxes)
         matched_features = [
-            feature for feature in expected_features
+            feature for feature in expected_inputs
             if feature in available_features
         ]
 
-        if expected_features and len(matched_features) == len(expected_features):
+        if expected_inputs and len(matched_features) == len(expected_inputs):
             self.sidebar.feature_picker.set_selected(matched_features)
-            feature_note = f" — {len(matched_features)} features matched"
-        elif expected_features:
+            feature_note = f" — {len(matched_features)} input features matched"
+        elif expected_inputs:
             missing = [
-                feature for feature in expected_features
+                feature for feature in expected_inputs
                 if feature not in available_features
             ]
             feature_note = (
@@ -885,17 +945,21 @@ class PlaybackAnnotationPage(QWidget):
         else:
             feature_note = " — select the training features manually"
 
+        display_name = str(
+            self.backend.model_metadata.get("display_name") or selected_name
+        )
         self.sidebar.model_status.setText(
-            Path(path).name + feature_note
+            display_name + feature_note
         )
 
-        self.sidebar.predict_dataset_button.setEnabled(True)
+        can_predict_dataset = bool(
+            self.backend.model is not None
+            and not self.backend.dataset.empty
+        )
+        self.sidebar.predict_dataset_button.setEnabled(can_predict_dataset)
 
-        # Loading a model does not create exportable predictions.
-        # Keep the export button hidden until prediction succeeds.
         self.export_predictions_button.setVisible(False)
         self.export_predictions_button.setEnabled(False)
-
         self.render_current_frame()
 
 

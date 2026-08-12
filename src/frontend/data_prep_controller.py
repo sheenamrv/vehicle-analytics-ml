@@ -452,6 +452,15 @@ class DataPrepControllerMixin:
         self.feature_summary_meta = {}
         self.refresh_feature_tables()
         self._suppress_dirty = False
+
+        # Refresh project-backed pages after the ICP state is restored
+        if hasattr(self, "refresh_model_page"):
+            self.refresh_model_page()
+        if hasattr(self, "refresh_results_page"):
+            self.refresh_results_page()
+        if hasattr(self, "refresh_realtime_dataset"):
+            self.refresh_realtime_dataset()
+
         self._set_dirty(False)
         QMessageBox.information(self, "Project Loaded", "Project loaded successfully.")
 

@@ -326,6 +326,7 @@ class AnalyticsWindow(
         self.model_sidebar = UnifiedModelSidebar()
         self.model_sidebar.add_model_requested.connect(self.add_or_update_model_definition)
         self.model_sidebar.import_external_requested.connect(self.import_external_model)
+        self.model_sidebar.category_selected.connect(self.on_model_category_selected)
         self.model_sidebar_scroll = self._scrollable_sidebar(self.model_sidebar)
         self.sidebar_stack.addWidget(self.model_sidebar_scroll)
         self.results_sidebar = self._scrollable_sidebar(self._results_sidebar())
