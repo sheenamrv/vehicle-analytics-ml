@@ -56,6 +56,54 @@ class ModelTrainingControllerMixin:
         del index
         self.refresh_model_page()
 
+    def on_model_category_selected(self, category):
+        if str(category).strip().lower() != "semi_supervised":
+            return
+
+        if self.project is None or self.working_df is None or self.working_df.empty:
+            QMessageBox.warning(
+                self,
+                "Semi-Supervised Dataset",
+                "Import a dataset before configuring a semi-supervised model.",
+            )
+            return
+
+        label = str(self.project.get("label_column", "") or "").strip()
+        if not label or label not in self.working_df.columns:
+            QMessageBox.warning(
+                self,
+                "Semi-Supervised Dataset",
+                "Select a valid label column before configuring a semi-supervised model.",
+            )
+            return
+
+        labels = self.working_df[label]
+        missing_mask = labels.isna()
+        try:
+            blank_mask = labels.astype("string").str.strip().eq("").fillna(False)
+            missing_mask = missing_mask | blank_mask
+        except Exception:
+            pass
+
+        missing_count = int(missing_mask.sum())
+        labeled_count = int((~missing_mask).sum())
+
+        if labeled_count == 0:
+            QMessageBox.warning(
+                self,
+                "Semi-Supervised Dataset",
+                f"The label column '{label}' has no known labels. Semi-supervised training needs both labeled and unlabeled rows.",
+            )
+            return
+
+        if missing_count == 0:
+            QMessageBox.warning(
+                self,
+                "Semi-Supervised Dataset",
+                f"The label column '{label}' has no missing labels. Semi-supervised training requires both labeled and unlabeled rows. Add missing values to the label column before adding or training this model.",
+            )
+            return
+
     def refresh_model_page(self):
         """Synchronize Added Models and Queue using project-backed state."""
         if self.project is None:
@@ -143,6 +191,44 @@ class ModelTrainingControllerMixin:
             return
 
         ModelController.ensure_project_state(self.project)
+
+        if str(payload.get("category", "")).strip().lower() == "semi_supervised":
+            label = str(self.project.get("label_column", "") or "").strip()
+            if self.working_df is None or self.working_df.empty or not label or label not in self.working_df.columns:
+                QMessageBox.warning(
+                    self,
+                    "Semi-Supervised Dataset",
+                    "Semi-supervised models require a dataset with a valid label column.",
+                )
+                return
+
+            labels = self.working_df[label]
+            missing_mask = labels.isna()
+            try:
+                blank_mask = labels.astype("string").str.strip().eq("").fillna(False)
+                missing_mask = missing_mask | blank_mask
+            except Exception:
+                pass
+
+            labeled_count = int((~missing_mask).sum())
+            missing_count = int(missing_mask.sum())
+
+            if labeled_count == 0:
+                QMessageBox.warning(
+                    self,
+                    "Semi-Supervised Dataset",
+                    f"The label column '{label}' needs at least one known label before a semi-supervised model can be added.",
+                )
+                return
+
+            if missing_count == 0:
+                QMessageBox.warning(
+                    self,
+                    "Semi-Supervised Dataset",
+                    f"The label column '{label}' needs at least one missing label before a semi-supervised model can be added.",
+                )
+                return
+
         added_models = self.project.setdefault("added_models", [])
         existing_names = [item.get("name", "") for item in added_models]
 

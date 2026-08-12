@@ -88,13 +88,6 @@ MODEL_CATALOG: Dict[str, Dict[str, Dict[str, Any]]] = {
                         "svm",
                     ],
                 },
-                "hide_labeled_percent": {
-                    "type": "float",
-                    "default": 30.0,
-                    "min": 0.0,
-                    "max": 95.0,
-                    "step": 5.0,
-                },
                 "max_iter": {"type": "int", "default": 10, "min": 1, "max": 100, "step": 1},
             },
             # Criterion-specific controls live in the Advanced Parameters dialog

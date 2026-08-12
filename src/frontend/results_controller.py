@@ -317,11 +317,16 @@ class ResultsControllerMixin:
         self.main_stack.addWidget(self.results_page)
 
     def on_results_tab_changed(self, index):
+        if index < 0 or index >= len(self.results_tabs["buttons"]):
+            return
+
         self.results_tabs["buttons"][index].setChecked(True)
-        self.results_pages.setCurrentIndex(index)
+        if self.results_pages.currentIndex() == index:
+            return
+
         if hasattr(self, "results_comparison_controls"):
             self.results_comparison_controls.setVisible(index == 1)
-        self._sync_results_stack_to_current_page()
+        self.results_pages.setCurrentIndex(index)
 
     def _sync_results_stack_to_current_page(self, index=None):
         del index
@@ -331,12 +336,11 @@ class ResultsControllerMixin:
         if current_page is None:
             return
 
-        # Keep the scroll target sized to the active tab only so vertical
-        # scrolling appears only when the visible Results content exceeds
-        # the available viewport.
-        current_page.adjustSize()
+        # Keep the scroll target sized to the active tab without resizing the page itself
         page_hint = current_page.sizeHint()
-        self.results_pages.setMinimumHeight(max(0, page_hint.height()))
+        minimum_hint = current_page.minimumSizeHint()
+        target_height = max(page_hint.height(), minimum_hint.height(), 0)
+        self.results_pages.setMinimumHeight(target_height)
         self.results_pages.updateGeometry()
 
     @staticmethod
