@@ -128,6 +128,12 @@ class PlaybackAnnotationManager:
         self.prediction_dataset = pd.DataFrame()
         return self.model
 
+    def clear_model(self) -> None:
+        self.model = None
+        self.model_path = None
+        self.model_metadata = {}
+        self.prediction_dataset = pd.DataFrame()
+
     @staticmethod
     def _estimator_feature_names(model: Any) -> list[str]:
         if model is None:

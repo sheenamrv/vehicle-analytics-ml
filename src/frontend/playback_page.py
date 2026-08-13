@@ -185,6 +185,9 @@ class PlaybackAnnotationPage(QWidget):
         self.sidebar.load_video_button.clicked.connect(
             self.load_video
         )
+        self.sidebar.remove_video_button.clicked.connect(
+            self.remove_video
+        )
         self.video_controller.status_changed.connect(
             self.sidebar.video_status.setText
         )
@@ -236,6 +239,9 @@ class PlaybackAnnotationPage(QWidget):
         # Model
         self.sidebar.load_model_button.clicked.connect(
             self.load_model
+        )
+        self.sidebar.remove_model_button.clicked.connect(
+            self.remove_model
         )
 
         # Dataset playback
@@ -528,6 +534,7 @@ class PlaybackAnnotationPage(QWidget):
         self.sidebar.model_status.setText(
             "No model loaded"
         )
+        self.sidebar.remove_model_button.setEnabled(False)
         self.sidebar.predict_dataset_button.setEnabled(False)
         self.export_predictions_button.setVisible(False)
         self.export_predictions_button.setEnabled(False)
@@ -538,6 +545,7 @@ class PlaybackAnnotationPage(QWidget):
         self.sidebar.video_status.setText(
             "No video selected"
         )
+        self.sidebar.remove_video_button.setEnabled(False)
 
         self.sidebar.set_columns(
             pd.DataFrame()
@@ -951,6 +959,7 @@ class PlaybackAnnotationPage(QWidget):
         self.sidebar.model_status.setText(
             display_name + feature_note
         )
+        self.sidebar.remove_model_button.setEnabled(True)
 
         can_predict_dataset = bool(
             self.backend.model is not None
@@ -958,6 +967,15 @@ class PlaybackAnnotationPage(QWidget):
         )
         self.sidebar.predict_dataset_button.setEnabled(can_predict_dataset)
 
+        self.export_predictions_button.setVisible(False)
+        self.export_predictions_button.setEnabled(False)
+        self.render_current_frame()
+
+    def remove_model(self):
+        self.backend.clear_model()
+        self.sidebar.model_status.setText("No model loaded")
+        self.sidebar.remove_model_button.setEnabled(False)
+        self.sidebar.predict_dataset_button.setEnabled(False)
         self.export_predictions_button.setVisible(False)
         self.export_predictions_button.setEnabled(False)
         self.render_current_frame()
@@ -1089,9 +1107,17 @@ class PlaybackAnnotationPage(QWidget):
             return
 
         self.video_section.show()
+        self.sidebar.remove_video_button.setEnabled(True)
         self.video_sync.reset()
         self.sync_video_to_current_row(force=True)
         QTimer.singleShot(0, self._scroll_to_video)
+
+    def remove_video(self):
+        self.video_controller.clear()
+        self.video_sync.reset()
+        self.sidebar.remove_video_button.setEnabled(False)
+        if VIDEO_AVAILABLE:
+            self.video_section.hide()
 
     def play_video(self):
         if not self.video_controller.play():

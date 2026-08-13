@@ -105,9 +105,12 @@ class PlaybackSidebar(QWidget):
         layout.addWidget(self.udp_controls_container)
 
         self.load_video_button = secondary_button("Open Video Stream/File")
+        self.remove_video_button = secondary_button("Remove Video")
+        self.remove_video_button.setEnabled(False)
         self.video_status = QLabel("No video selected")
         self.video_status.setWordWrap(True)
         layout.addWidget(self.load_video_button)
+        layout.addWidget(self.remove_video_button)
         layout.addWidget(self.video_status)
         layout.addWidget(divider())
 
@@ -154,7 +157,10 @@ class PlaybackSidebar(QWidget):
 
         layout.addWidget(section_label("MODEL"))
         self.load_model_button = secondary_button("Load Pretrained Model")
+        self.remove_model_button = secondary_button("Remove Model")
+        self.remove_model_button.setEnabled(False)
         layout.addWidget(self.load_model_button)
+        layout.addWidget(self.remove_model_button)
 
         self.model_status = QLabel("No model loaded")
         self.model_status.setWordWrap(True)
